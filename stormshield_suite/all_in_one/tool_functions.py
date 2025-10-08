@@ -249,91 +249,245 @@ VALID_FILTER_TOKENS = {
 
 # --- Helper functions from converter.py, adapted for integration ---
 
-def _parse_dependency_file(file_path: str) -> set:
-    """Parses object or interface files to get a set of names."""
-    if not file_path or not os.path.exists(file_path):
-        return set()
+from itertools import zip_longest
+from pathlib import Path
+import unicodedata
+import datetime
+
+# --- Start of Converter Script Logic ---
+
+# --- Constants ---
+_CONVERTER_MAX_NSRPC_LINE = 1024
+_CONVERTER_ALLOWED_ACTIONS = {"pass", "block", "drop", "bypass", "deleg", "reset", "log", "decrypt", "nat"}
+_CONVERTER_CSV_TO_NSRPC_MAP = {
+    "rule_name": "rulename", "comment": "comment", "state": "state", "action": "action",
+    "count": "count", "rate": "rate", "set_tos": "settos", "inspection": "inspection",
+    "service": "service", "log_level": "loglevel", "schedule": "schedule",
+    "route": "route", "no_conn_log": "noconnlog", "tos": "tos", "ip_proto": "ipproto",
+    "proto": "proto", "from_user_type": "srcusertype", "from_user_domain": "srcuserdomain",
+    "from_user_method": "srcusermethod", "from_src": "srctarget", "from_geo": "srcgeo",
+    "from_ip_rep": "srciprep", "from_host_rep": "srchostrep", "from_port": "srcport",
+    "from_if": "srcif", "via": "via", "to_dest": "dsttarget", "to_geo": "dstgeo",
+    "to_ip_rep": "dstiprep", "to_host_rep": "dsthostrep", "to_port": "dstport",
+    "to_if": "dstif", "nat_before_vpn": "beforevpn", "nat_from_target": "natsrctarget",
+    "nat_from_arp": "natsrcarp", "nat_from_port": "natsrcport",
+    "nat_from_load_balancing": "natsrclb", "nat_to_target": "natdsttarget",
+    "nat_to_arp": "natdstarp", "nat_to_port": "natdstport",
+    "nat_to_load_balancing": "natdstlb",
+}
+_CONVERTER_CSV_ALIASES = {
+    "service": ["service", "to_port", "dstport"], "from_src": ["from_src", "source"],
+    "to_dest": ["to_dest", "destination"], "nat_from_target": ["nat_from_target", "natsrctarget"],
+    "nat_to_target": ["nat_to_target", "natdsttarget"], "nat_to_port": ["nat_to_port", "natdstport"],
+    "log_level": ["log_level", "loglevel"],
+}
+_CONVERTER_VALID_FILTER_TOKENS = {
+    "rulename", "comment", "state", "action", "count", "rate", "settos",
+    "inspection", "service", "loglevel", "schedule", "route", "noconnlog",
+    "tos", "ipproto", "proto", "srcusertype", "srcuserdomain", "srcusermethod",
+    "srctarget", "srcgeo", "srciprep", "srchostrep", "srcport", "srcif", "via",
+    "dsttarget", "dstgeo", "dstiprep", "dsthostrep", "dstport", "dstif"
+}
+
+# --- Helper Functions ---
+
+def _converter_parse_objects_file(file_path: Path) -> set:
+    if not file_path or not file_path.exists(): return set()
     names = set()
     name_re = re.compile(r'name="([^"]+)"')
-    ifname_re = re.compile(r'ifname=("[^"]+"|\S+)')
-    with open(file_path, "r", encoding="utf-8") as f:
+    with file_path.open("r", encoding="utf-8") as f:
         for line in f:
-            match = name_re.search(line) or ifname_re.search(line)
-            if match:
-                names.add(match.group(1).strip('"'))
-    print(f"Loaded {len(names)} names from {os.path.basename(file_path)}.")
+            match = name_re.search(line)
+            if match: names.add(match.group(1))
+            else:
+                clean_line = line.strip()
+                if clean_line and not clean_line.startswith('#'): names.add(clean_line)
+    print(f"[INFO] Loaded {len(names)} existing objects from {file_path.name}.")
     return names
 
-def _read_csv_rules(path: str) -> list:
-    """Reads rules from a CSV file, normalizing header keys to lowercase."""
-    if not path or not os.path.exists(path):
-        print(f"Error: CSV file not found at {path}")
-        return []
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f, delimiter=';')
-        # Normalize keys to lowercase for consistent, case-insensitive access
-        normalized_rows = []
-        for row in reader:
-            # Ensure key is not None before calling lower() and strip()
-            if row: # Handle empty rows
-                normalized_row = {k.lower().strip(): v for k, v in row.items() if k}
-                normalized_rows.append(normalized_row)
-        return normalized_rows
+def _converter_parse_interfaces_file(file_path: Path) -> set:
+    if not file_path or not file_path.exists(): return set()
+    names = set()
+    ifname_re = re.compile(r'ifname=("[^"]+"|\S+)')
+    name_re = re.compile(r'Name="([^"]+)"')
+    with file_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            clean_line = line.strip()
+            ifname_match = ifname_re.search(clean_line)
+            if ifname_match: names.add(ifname_match.group(1).strip('"')); continue
+            name_match = name_re.search(clean_line)
+            if name_match: names.add(name_match.group(1)); continue
+            if clean_line and not clean_line.startswith(('#', '[')) and '=' not in clean_line: names.add(clean_line)
+    print(f"[INFO] Loaded {len(names)} existing interfaces from {file_path.name}.")
+    return names
 
-def _format_nsrpc_param(value: str) -> str:
-    """Formats a value for an NSRPC command."""
-    clean_val = value.strip()
+def _converter_read_csv(path: Path) -> list:
+    with path.open("r", encoding="utf-8-sig", newline="") as f: all_lines = f.readlines()
+    header_line_content = None; header_line_index = -1
+    for i, line in enumerate(all_lines):
+        stripped = line.strip()
+        if stripped: header_line_content = stripped.lstrip('#'); header_line_index = i; break
+    if header_line_content is None: return []
+    data_lines = [line for line in all_lines[header_line_index + 1:] if line.strip()]
+    delim = ';' if ';' in header_line_content else ','
+    original_headers = next(csv.reader([header_line_content], delimiter=delim))
+    cleaned_headers = []
+    counts = {}
+    for h in original_headers:
+        stripped_h = h.strip().lstrip('#').strip('"').lower()
+        if stripped_h in counts: counts[stripped_h] += 1; cleaned_headers.append(f"{stripped_h}_{counts[stripped_h]}")
+        else: counts[stripped_h] = 0; cleaned_headers.append(stripped_h)
+    final_rows = []
+    reader = csv.reader(data_lines, delimiter=delim)
+    for fields in reader:
+        if not any(field.strip() for field in fields): continue
+        padded_fields = fields + [""] * (len(cleaned_headers) - len(fields))
+        row_dict = dict(zip(cleaned_headers, padded_fields[:len(cleaned_headers)]))
+        for key, value in row_dict.items(): row_dict[key] = value.strip().strip('"') if value is not None else ""
+        final_rows.append(row_dict)
+    return final_rows
+
+def _converter_is_valid_host_ip(s: str) -> bool:
+    return bool(re.compile(r"^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$").match(s))
+
+def _converter_generate_host_objects(rows: list) -> tuple:
+    unique_ips = set()
+    source_aliases = ["from_src", "source_ip", "src", "source", "src_ip"]
+    dest_aliases = ["to_dest", "destination_ip", "dest_ip", "dst_ip", "destination"]
+    natsrc_aliases = ["nat_from_target", "natsrctarget", "src_translation", "to_src"]
+    natdest_aliases = ["nat_to_target", "natdsttarget", "dst_translation", "to_dst", "translated_ip", "to"]
+    for row in rows:
+        for aliases in [source_aliases, dest_aliases, natsrc_aliases, natdest_aliases]:
+            ip_value = _converter_pick(row, aliases)
+            if _converter_is_valid_host_ip(ip_value): unique_ips.add(ip_value)
+    commands = []
+    if unique_ips:
+        commands.append("# --- Objets Hôtes ---")
+        for ip in sorted(list(unique_ips)):
+            object_name = f"H_{ip.replace('.', '_')}"
+            commands.append(f'CONFIG OBJECT HOST NEW name={object_name} ip={ip} comment=""')
+        commands.append("")
+    return commands, unique_ips
+
+def _converter_is_valid_ip_or_network(s: str) -> bool:
+    ip_re = re.compile(r"^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$")
+    cidr_re = re.compile(r"^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)/(?:[0-2]?\d|3[0-2])$")
+    range_re = re.compile(r"^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)-(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$")
+    return bool(ip_re.match(s) or cidr_re.match(s) or range_re.match(s))
+
+def _converter_format_nsrpc_param(value: str) -> str:
+    clean_val = "".join(c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c)).strip()
+    if not clean_val: return '""'
     is_simple = re.match(r'^[a-zA-Z0-9_.-]+$', clean_val) is not None
-    if clean_val.lower() == 'any' or is_simple:
-        return clean_val
-    return f'"{clean_val.replace("\"", r"\"")}"'
+    if clean_val.lower() == 'any' or _converter_is_valid_ip_or_network(clean_val) or is_simple: return clean_val
+    else: return f'"{clean_val.replace("\"", r"\"")}"'
 
-def _pick(row: dict, keys: list) -> str:
-    """Picks the first non-empty value from a row using a list of possible keys."""
+def _converter_pick(row: dict, keys: list) -> str:
     for k in keys:
-        if k in row and row[k]:
-            return row[k].strip()
+        v = row.get(k, "").strip()
+        if v: return v
     return ""
 
-def _find_missing_dependencies(row: dict, known_objects: set, known_interfaces: set) -> list:
-    """Checks a rule for missing objects or interfaces."""
-    missing = []
-    all_known = known_objects.union(known_interfaces)
-    object_fields = ["from_src", "to_dest", "service", "nat_from_target", "nat_to_target", "nat_to_port"]
-    for field in object_fields:
-        val = _pick(row, CSV_ALIASES.get(field, [field]))
-        if val and val.lower() != 'any':
-            for name in [n.strip() for n in val.split(',')]:
-                if name and name not in all_known:
-                    missing.append(("OBJECT", name))
+def _converter_coerce_action(val: str) -> str:
+    v = (val or "").strip().lower()
+    if v in _CONVERTER_ALLOWED_ACTIONS: return v
+    return {"allow": "pass", "accept": "pass", "deny": "drop"}.get(v)
 
+def _converter_find_missing_dependencies(row: dict, known_objects: set, known_interfaces: set, created_host_ips: set) -> list:
+    missing = []
+    all_known_names = known_objects.union(known_interfaces, {f"H_{ip.replace('.', '_')}" for ip in created_host_ips})
+    object_fields = ["from_src", "to_dest", "service", "nat_from_target", "nat_to_target", "nat_to_port", "schedule", "route", "from_geo", "to_geo", "from_ip_rep", "to_ip_rep"]
+    for field in object_fields:
+        aliases = _CONVERTER_CSV_ALIASES.get(field, [field])
+        val = _converter_pick(row, aliases)
+        if val and val.lower() != 'any' and not _converter_is_valid_ip_or_network(val):
+            for name in [name.strip() for name in val.split(',')]:
+                if name and name not in all_known_names: missing.append(("OBJECT", name))
     if_fields = ["from_if", "to_if"]
     for field in if_fields:
-        val = _pick(row, [field])
+        val = _converter_pick(row, [field])
         if val and val.lower() != 'any':
-            if val not in known_interfaces:
-                missing.append(("INTERFACE", val))
+            for name in [name.strip() for name in val.split(',')]:
+                if name and name not in known_interfaces: missing.append(("INTERFACE", name))
     return list(set(missing))
 
-def _build_rule_cmd(row: dict, position: int) -> tuple:
-    """Builds a single FILTER or NAT NSRPC command."""
-    is_nat = _pick(row, ["action"]) == "nat"
-    rule_type = "nat" if is_nat else "filter"
-    parts = ["CONFIG FILTER RULE INSERT", f"type={rule_type}", f"position={position}"]
-    if is_nat:
-        parts.append("action=nat")
+def _converter_classify_row(row: dict) -> str:
+    if "nat" in _converter_pick(row, ["type_slot"]).lower(): return "NAT"
+    if _converter_pick(row, ["action"]).lower() == "nat": return "NAT"
+    if _converter_pick(row, ["nat_from_target"]) or _converter_pick(row, ["nat_to_target"]): return "NAT"
+    return "FILTER"
 
-    # Map CSV fields to NSRPC tokens
-    for csv_key, nsrpc_token in CSV_TO_NSRPC_MAP.items():
-        if is_nat and nsrpc_token not in VALID_FILTER_TOKENS and 'nat' not in nsrpc_token:
-             continue
-        aliases = CSV_ALIASES.get(csv_key, [csv_key])
-        value = _pick(row, aliases)
+def _converter_build_filter_cmd(row: dict, prefix: str, default_slot: int, position: int, created_host_ips: set = None) -> tuple:
+    if created_host_ips is None: created_host_ips = set()
+    parts = ["CONFIG FILTER RULE INSERT", f"index={int(_converter_pick(row, ['policy', 'slot', 'index']) or default_slot)}", "type=filter", f"position={position}"]
+    rule_name = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("rule_name", ["rule_name"]))
+    comment = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("comment", ["comment"]))
+    if not rule_name: rule_name = comment if comment else f"FilterRule-{position:04d}"; comment = "" if rule_name == comment else comment
+    if prefix: rule_name = f"{prefix}{rule_name}"
+    rule_name = "".join(c for c in unicodedata.normalize("NFKD", rule_name.replace("\n", " ").strip()) if not unicodedata.combining(c))
+    if len(rule_name) > 64: rule_name = rule_name[:61] + "..."
+    if rule_name: parts.append(f"rulename={_converter_format_nsrpc_param(rule_name)}")
+    if comment: parts.append(f"comment={_converter_format_nsrpc_param(comment)}")
+    for csv_key, nsrpc_token in _CONVERTER_CSV_TO_NSRPC_MAP.items():
+        if csv_key in ["rule_name", "comment"] or nsrpc_token not in _CONVERTER_VALID_FILTER_TOKENS: continue
+        value = _converter_pick(row, _CONVERTER_CSV_ALIASES.get(csv_key, [csv_key]))
         if value:
-            parts.append(f"{nsrpc_token}={_format_nsrpc_param(value)}")
-
+            if nsrpc_token in ["srctarget", "dsttarget"] and value in created_host_ips: value = f"H_{value.replace('.', '_')}"
+            if nsrpc_token == "action":
+                value = _converter_coerce_action(value)
+                if not value: return None, f"action de filtre inconnue: {_converter_pick(row, _CONVERTER_CSV_ALIASES.get(csv_key, [csv_key]))!r}"
+            if nsrpc_token == "ipproto" and "," in value: value = value.split(',')[0]
+            parts.append(f"{nsrpc_token}={_converter_format_nsrpc_param(value)}")
     cmd = " ".join(parts)
-    return (cmd, None) if len(cmd) <= MAX_NSRPC_LINE else (None, "Generated command is too long")
+    return (cmd, None) if len(cmd) <= _CONVERTER_MAX_NSRPC_LINE else (None, "ligne NSRPC générée trop longue")
+
+def _converter_build_nat_cmd(row: dict, prefix: str, default_slot: int, position: int, created_host_ips: set = None) -> tuple:
+    if created_host_ips is None: created_host_ips = set()
+    parts = ["CONFIG FILTER RULE INSERT", f"index={int(_converter_pick(row, ['policy', 'slot', 'index']) or default_slot)}", "type=nat", "action=nat", f"position={position}"]
+    rule_name = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("rule_name", ["rule_name"]))
+    comment = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("comment", ["comment"]))
+    if not rule_name: rule_name = comment if comment else f"NatRule-{position:04d}"; comment = "" if rule_name == comment else comment
+    if prefix: rule_name = f"{prefix}{rule_name}"
+    rule_name = "".join(c for c in unicodedata.normalize("NFKD", rule_name.replace("\n", " ").strip()) if not unicodedata.combining(c))
+    if len(rule_name) > 64: rule_name = rule_name[:61] + "..."
+    if rule_name: parts.append(f"rulename={_converter_format_nsrpc_param(rule_name)}")
+    if comment: parts.append(f"comment={_converter_format_nsrpc_param(comment)}")
+    if 'dstport' not in row or not row['dstport']:
+        service_val = _converter_pick(row, _CONVERTER_CSV_ALIASES.get('service', ['service']))
+        if service_val: row['dstport'] = service_val
+    for csv_key, nsrpc_token in _CONVERTER_CSV_TO_NSRPC_MAP.items():
+        if csv_key in ["rule_name", "comment", "action", "service"]: continue
+        value = _converter_pick(row, _CONVERTER_CSV_ALIASES.get(csv_key, [csv_key]))
+        if value:
+            if nsrpc_token in ["srctarget", "dsttarget", "natsrctarget", "natdsttarget"] and value in created_host_ips: value = f"H_{value.replace('.', '_')}"
+            if nsrpc_token == "ipproto" and "," in value: value = value.split(',')[0]
+            parts.append(f"{nsrpc_token}={_converter_format_nsrpc_param(value)}")
+    cmd = " ".join(parts)
+    return (cmd, None) if len(cmd) <= _CONVERTER_MAX_NSRPC_LINE else (None, "ligne NSRPC générée trop longue")
+
+def _converter_write_safe_rules_file(out_path: Path, cmd_list: list, source_csv_paths: list, activate: bool, slot: int, group_by_10: bool = False):
+    header = [f"# NSRPC generated on {datetime.datetime.now().isoformat(timespec='seconds')}", f"# Source CSVs: {', '.join(map(str, source_csv_paths))}", f"# Number of commands: {len(cmd_list)}", "SYSTEM SESSION language=fr", "MODIFY ON FORCE", f"CONFIG SLOT ACTIVATE type=filter slot={slot}"]
+    with out_path.open("w", encoding="utf-8", newline="") as f:
+        f.write("\n".join(header) + "\n\n")
+        rule_count = 0
+        for cmd in cmd_list:
+            f.write(cmd + "\n")
+            if cmd.strip() and not cmd.strip().startswith("#"):
+                rule_count += 1
+                if group_by_10 and rule_count > 0 and rule_count % 10 == 0: f.write("\n")
+        if activate: f.write("\nCONFIG FILTER ACTIVATE\n")
+
+def _converter_write_pending_rules_file(out_path: Path, pending_rules: list):
+    warning_header = ["######################################################################", "# WARNING: PENDING RULES                                           #", "# ------------------------------------------------------------------ #", "# The commands in this file have MISSING DEPENDENCIES.               #", "# They are provided for debugging purposes and are LIKELY TO FAIL if #", "# executed directly on a firewall without first creating the       #", "# missing objects or interfaces.                                     #", "######################################################################", f"\n# Generated on: {datetime.datetime.now().isoformat(timespec='seconds')}\n"]
+    with out_path.open("w", encoding="utf-8") as f: f.write("\n".join(warning_header)); f.write("\n".join(pending_rules))
+
+def _converter_write_missing_dependencies_file(out_path: Path, missing_deps: set):
+    header = f"# Missing dependencies found on {datetime.datetime.now().isoformat(timespec='seconds')}"
+    with out_path.open("w", encoding="utf-8") as f:
+        f.write(header + "\n\n")
+        if not missing_deps: f.write("# No missing dependencies were found.\n")
+        else:
+            for dep_type, name in sorted(list(missing_deps)): f.write(f"{dep_type}: {name}\n")
 
 def _find_latest_ref_file(directory: str, keyword: str) -> str:
     """Finds the most recent file in a directory containing a specific keyword."""
@@ -341,80 +495,114 @@ def _find_latest_ref_file(directory: str, keyword: str) -> str:
         files = [os.path.join(directory, f) for f in os.listdir(directory) if keyword in f and os.path.isfile(os.path.join(directory, f))]
         if not files:
             return ""
-        # Return the file with the latest modification time
         return max(files, key=os.path.getmtime)
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError):
         return ""
 
+# --- End of Converter Script Logic ---
+
 def convert_rules(config):
-    """Orchestrates the CSV to NSRPC conversion process."""
-    print("This tool converts a CSV file of firewall rules into NSRPC commands.")
+    """Orchestrates the CSV to NSRPC conversion process with a user-friendly interface."""
+    print("\n--- Convert Rules from CSV to CLI ---")
+    print("This tool converts Stormshield CSV rule exports into NSRPC command scripts with dependency validation.")
 
-    # --- Get Inputs ---
-    default_csv = config.get('Paths', 'rules_csv_path', fallback="")
-    csv_path = get_input("Enter the path to your rules CSV file", default_csv)
-    if not os.path.exists(csv_path):
-        print(f"Error: File not found: {csv_path}")
+    # --- Get User Inputs ---
+    csv_paths_str = get_input("Enter path(s) to your input CSV file(s) (comma-separated)", config.get('Paths', 'rules_csv_path', fallback=""))
+    if not csv_paths_str:
+        print("Error: No input CSV files provided.")
         return
+    csv_paths = [Path(p.strip()) for p in csv_paths_str.split(',') if p.strip()]
 
-    ref_dir = config.get('Paths', 'reference_dir')
-    # Dynamically find the latest object and interface files
-    latest_obj_file = _find_latest_ref_file(ref_dir, "objects")
-    latest_if_file = _find_latest_ref_file(ref_dir, "interfaces")
+    ref_dir = Path(config.get('Paths', 'reference_dir'))
+    obj_file_path = get_input("Enter path to the objects file for validation (optional)", _find_latest_ref_file(str(ref_dir), "objects"))
+    if_file_path = get_input("Enter path to the interfaces file for validation (optional)", _find_latest_ref_file(str(ref_dir), "interfaces"))
 
-    obj_file = get_input("Enter path to the objects file (or press Enter to skip validation)", latest_obj_file)
-    if_file = get_input("Enter path to the interfaces file (or press Enter to skip validation)", latest_if_file)
+    print("\n--- Rule Generation Options ---")
+    prefix = get_input("Enter a prefix to prepend to rule names (optional)", "")
+    slot = int(get_input("Enter the default filter policy slot (index)", "9"))
+    start_pos = int(get_input("Enter the starting position for new rules", "1"))
+    create_hosts = get_input("Automatically create host objects for IPs? (yes/no)", "no").lower() == 'yes'
+    activate = get_input("Append 'CONFIG FILTER ACTIVATE' to the script? (yes/no)", "yes").lower() == 'yes'
+    group_by_10 = get_input("Add a blank line every 10 rules for readability? (yes/no)", "yes").lower() == 'yes'
 
-    # --- Load Dependencies ---
-    known_objects = _parse_dependency_file(obj_file)
-    known_interfaces = _parse_dependency_file(if_file)
+    # --- Setup ---
+    output_dir = Path(config.get('Paths', 'output_dir'))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    known_objects = _converter_parse_objects_file(Path(obj_file_path)) if obj_file_path else set()
+    known_interfaces = _converter_parse_interfaces_file(Path(if_file_path)) if if_file_path else set()
+
+    # --- Read and Interleave Rows ---
+    all_rows = []
+    for path in csv_paths:
+        if not path.exists():
+            print(f"[ERROR] CSV file not found: {path}", file=sys.stderr)
+            continue
+        try:
+            rows = _converter_read_csv(path)
+            all_rows.extend(rows)
+            print(f"[INFO] Read {len(rows)} rows from {path.name}")
+        except Exception as e:
+            print(f"[ERROR] Failed to read CSV {path.name}: {e}", file=sys.stderr)
 
     # --- Process Rules ---
-    rules = _read_csv_rules(csv_path)
-    if not rules:
-        print("No rules found in the CSV file.")
-        return
+    safe_commands, pending_rules, all_missing_dependencies = [], [], set()
+    created_host_ips = set()
+    if create_hosts:
+        host_commands, created_host_ips = _converter_generate_host_objects(all_rows)
+        safe_commands.extend(host_commands)
+        if host_commands: print(f"[INFO] {len(created_host_ips)} unique Host objects will be created.")
 
-    safe_commands, pending_rules, missing_deps = [], [], set()
-    position = 1
-    for i, row in enumerate(rules):
-        missing = _find_missing_dependencies(row, known_objects, known_interfaces)
-        cmd, err = _build_rule_cmd(row, position)
+    current_position = start_pos
+    for i, row in enumerate(all_rows):
+        if _converter_pick(row, ["separator_color"]): continue
+
+        rtype = _converter_classify_row(row)
+        cmd, err = None, None
+        if rtype == "NAT":
+            cmd, err = _converter_build_nat_cmd(row, prefix, slot, current_position, created_host_ips)
+        else:
+            cmd, err = _converter_build_filter_cmd(row, prefix, slot, current_position, created_host_ips)
+
+        missing = _converter_find_missing_dependencies(row, known_objects, known_interfaces, created_host_ips)
 
         if not missing and cmd:
             safe_commands.append(cmd)
-            position += 1
+            current_position += 1
         else:
-            reason = ", ".join([f"{t}:{n}" for t, n in missing]) if missing else err
-            pending_rules.append(f"# Rule from row {i+2} is PENDING. Reason: {reason}\n# Data: {row}\n")
-            if missing:
-                missing_deps.update(missing)
+            reasons = ", ".join([f"{t}:{n}" for t, n in sorted(list(set(missing)))])
+            if cmd:
+                pending_rules.append(f"# PENDING: Missing dependencies: {reasons}\n{cmd}\n")
+            else:
+                build_error = f"Build error: {err or 'unknown'}"
+                missing_error = f"Missing: {reasons}" if reasons else ""
+                pending_rules.append(f"# PENDING: Rule from row {i+1} could not be processed.\n# {missing_error} {build_error}\n# Original data: {row}\n")
+            all_missing_dependencies.update(missing)
 
     # --- Write Output Files ---
-    output_dir = config.get('Paths', 'output_dir')
+    out_safe_path = output_dir / "rules_safe.txt"
+    _converter_write_safe_rules_file(out_safe_path, safe_commands, [p.name for p in csv_paths], activate, slot, group_by_10)
 
-    # Safe rules
-    safe_path = os.path.join(output_dir, "rules_safe.txt")
-    with open(safe_path, 'w', encoding='utf-8') as f:
-        f.write(f"# Generated on {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"# Source CSV: {csv_path}\n\n")
-        f.write("\n".join(safe_commands))
-        f.write("\n\nCONFIG FILTER ACTIVATE\n")
+    num_safe_rules = len([c for c in safe_commands if c.strip() and not c.strip().startswith("#")])
+    summary = (
+        f"\n[INFO] Processing complete.\n"
+        f"  - Total lines read from CSV: {len(all_rows)}\n"
+        f"  - Safe commands generated: {num_safe_rules}\n"
+        f"  - Pending or ignored rules: {len(pending_rules)}\n"
+        f"  - Unique missing dependencies found: {len(all_missing_dependencies)}"
+    )
+    print(summary)
+    print(f"\n[INFO] Safe rules file created: {out_safe_path}")
 
-    print(f"\nProcessing complete.")
-    print(f"  - {len(safe_commands)} safe rules written to: {safe_path}")
-
-    # Pending rules and dependencies
     if pending_rules:
-        pending_path = os.path.join(output_dir, "rules_pending.txt")
-        with open(pending_path, 'w', encoding='utf-8') as f:
-            f.write("\n".join(pending_rules))
-        print(f"  - {len(pending_rules)} pending rules written to: {pending_path}")
+        out_pending_path = output_dir / "rules_pending.txt"
+        _converter_write_pending_rules_file(out_pending_path, pending_rules)
+        print(f"[INFO] Pending rules file created: {out_pending_path}")
 
-        deps_path = os.path.join(output_dir, "dependencies_missing.txt")
-        with open(deps_path, 'w', encoding='utf-8') as f:
-            f.write("\n".join(sorted([f"{t}: {n}" for t, n in missing_deps])))
-        print(f"  - {len(missing_deps)} missing dependencies listed in: {deps_path}")
+    if all_missing_dependencies:
+        out_missing_path = output_dir / "dependencies_missing.txt"
+        _converter_write_missing_dependencies_file(out_missing_path, all_missing_dependencies)
+        print(f"[INFO] Missing dependencies file created: {out_missing_path}")
 
 def _find_missing_rules_logic(source_rules, final_rules):
     """Identifies rules present in source but missing in final."""
