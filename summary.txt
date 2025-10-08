@@ -1,0 +1,24 @@
+Firewall Log Analysis Summary
+==============================
+Total rows processed: 9
+Total unique flows identified: 6
+
+Top 10 Flows by Count:
+-------------------------
+     srcname          dstname dstportname  count
+    10.0.0.1     web-server-1        http      3
+    10.0.0.2      db-server-1       mysql      2
+    10.0.0.1      api-gateway       https      1
+    10.0.0.3     web-server-1         ssh      1
+ 192.168.1.1     web-server-1        http      1
+203.0.113.10 external-service       https      1
+
+Top 10 Flows by Total Traffic (Received + Sent):
+--------------------------------------------------
+     srcname          dstname dstportname  total_traffic  total_rcvd  total_sent
+    10.0.0.1      api-gateway       https         6500.0      5000.0      1500.0
+    10.0.0.1     web-server-1        http         4750.0      3700.0      1050.0
+    10.0.0.2      db-server-1       mysql         1250.0       500.0       750.0
+203.0.113.10 external-service       https         1000.0         0.0      1000.0
+    10.0.0.3     web-server-1         ssh          150.0        50.0       100.0
+ 192.168.1.1     web-server-1        http          100.0       100.0         0.0
