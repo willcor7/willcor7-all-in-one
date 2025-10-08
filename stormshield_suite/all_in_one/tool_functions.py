@@ -12,83 +12,17 @@ def get_input(prompt, default=""):
     """Prompts the user for input, showing a default value."""
     return input(f"{prompt} [default: {default}]: ") or default
 
-def _process_logs_logic(input_path, output_csv_path, output_summary_path):
-    """
-    Processes firewall log files to deduplicate entries and generate summaries.
-    This is the refactored core logic from the original script.
-    """
-    # Step 1: Load data
-    if os.path.isdir(input_path):
-        print(f"Input path is a directory: {input_path}")
-        input_files = [os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith('.csv')]
-        if not input_files:
-            print("Error: No CSV files found in the directory.")
-            return None
-        df_list = [pd.read_csv(f, on_bad_lines='skip', encoding_errors='ignore', low_memory=False) for f in input_files]
-        df = pd.concat(df_list, ignore_index=True)
-    elif os.path.isfile(input_path):
-        print(f"Input path is a single file: {input_path}")
-        df = pd.read_csv(input_path, on_bad_lines='skip', encoding_errors='ignore', low_memory=False)
-    else:
-        print(f"Error: Input path {input_path} is not a valid file or directory.")
-        return None
-
-    print(f"Successfully loaded {len(df)} total rows.")
-
-    # Step 2: Clean and convert columns
-    required_cols = ['srcname', 'dstname', 'dstportname', 'time', 'rcvd', 'sent']
-    if not all(col in df.columns for col in required_cols):
-        print(f"Error: Input data must contain the following columns: {required_cols}")
-        return None
-
-    df['time'] = pd.to_datetime(df['time'], errors='coerce')
-    df['rcvd'] = pd.to_numeric(df['rcvd'], errors='coerce').fillna(0)
-    df['sent'] = pd.to_numeric(df['sent'], errors='coerce').fillna(0)
-    df.dropna(subset=['srcname', 'dstname', 'dstportname', 'time'], inplace=True)
-
-    # Step 3: Sort and aggregate
-    df.sort_values('time', ascending=True, inplace=True)
-    group_keys = ['srcname', 'dstname', 'dstportname']
-    agg_dict = {'time': ['min', 'max'], 'rcvd': 'sum', 'sent': 'sum'}
-    first_cols = {col: 'first' for col in df.columns if col not in group_keys and col not in agg_dict}
-    agg_dict.update(first_cols)
-    aggregated_df = df.groupby(group_keys).agg(agg_dict)
-    aggregated_df.columns = ['_'.join(col).strip() for col in aggregated_df.columns.values]
-    aggregated_df.rename(columns={'time_min': 'min_time', 'time_max': 'max_time', 'rcvd_sum': 'total_rcvd', 'sent_sum': 'total_sent'}, inplace=True)
-    aggregated_df['count'] = df.groupby(group_keys).size().values
-
-    # Reorder columns
-    output_cols = group_keys + ['count', 'min_time', 'max_time', 'total_rcvd', 'total_sent']
-    other_cols = [col for col in aggregated_df.columns if col not in output_cols]
-    aggregated_df = aggregated_df.reset_index()[output_cols + sorted(other_cols)]
-
-    # Step 4: Write outputs
-    aggregated_df.to_csv(output_csv_path, index=False)
-    print(f"Cleaned data with {len(aggregated_df)} unique flows written to {output_csv_path}")
-
-    # Step 5: Generate summary
-    aggregated_df['total_traffic'] = aggregated_df['total_rcvd'] + aggregated_df['total_sent']
-    top_10_by_count = aggregated_df.sort_values('count', ascending=False).head(10)
-    with open(output_summary_path, 'w') as f:
-        f.write("Firewall Log Analysis Summary\n" + "="*30 + "\n")
-        f.write(f"Total rows processed: {len(df)}\n")
-        f.write(f"Total unique flows identified: {len(aggregated_df)}\n\n")
-        f.write("Top 10 Flows by Count:\n" + "-"*25 + "\n")
-        f.write(top_10_by_count[['srcname', 'dstname', 'dstportname', 'count']].to_string(index=False))
-        f.write("\n")
-    print(f"Summary report written to {output_summary_path}")
-    return top_10_by_count
-
 def analyze_logs(config):
     """
-    Orchestrates the log analysis process.
+    Orchestrates the log analysis process using the full implementation.
     """
+    print("\n--- Analyze Firewall Logs ---")
     # Get paths from config or user input
     default_log_path = config.get('Paths', 'log_file_path', fallback="")
     log_path = get_input(f"Enter the path to the log file or directory", default_log_path)
 
     if not os.path.exists(log_path):
-        print(f"Error: The path '{log_path}' does not exist.")
+        print(f"Error: The path '{log_path}' does not exist.", file=sys.stderr)
         return
 
     # Define output paths using os.path.join for compatibility
@@ -97,47 +31,141 @@ def analyze_logs(config):
     output_summary_path = os.path.join(output_dir, 'analysis_summary.txt')
 
     # Run the analysis
-    top_flows = _process_logs_logic(log_path, output_csv_path, output_summary_path)
+    aggregated_df = _analyzer_process_logs(log_path, output_csv_path, output_summary_path)
 
     # Smart feature: Suggest creating a rule
-    if top_flows is not None and not top_flows.empty:
+    if aggregated_df is not None and not aggregated_df.empty:
         print("\n--- Rule Creation Suggestion ---")
-        print("Based on the analysis, here are the top traffic flows:")
+        top_flows = aggregated_df.sort_values('count', ascending=False).head(10)
+        print("Based on the analysis, here are the top 10 flows by count:")
         print(top_flows[['srcname', 'dstname', 'dstportname', 'count']].to_string(index=False))
 
-        create_rule = input("\nWould you like to create a new firewall rule based on these flows? (yes/no): ").lower()
+        create_rule = input("\nWould you like to create a new firewall rule based on one of these flows? (yes/no): ").lower()
         if create_rule == 'yes':
             print("\n--- Create a New Rule ---")
             print("This feature will append the new rule to a CSV file.")
 
-            # This part will be more fleshed out when convert_rules is integrated
-            # For now, it's a simplified version.
             try:
                 # Get rule details from user
                 src = get_input("Enter the source object name (e.g., from 'srcname' column)")
                 dst = get_input("Enter the destination object name (e.g., from 'dstname' column)")
                 port = get_input("Enter the service/port name (e.g., from 'dstportname' column)")
                 action = get_input("Enter the action (pass/block)", "pass")
+                comment = get_input("Enter a comment for the rule (optional)", f"Rule for {src} to {dst}")
 
                 # Get the rules file path
                 default_rules_path = config.get('Paths', 'rules_csv_path', fallback=os.path.join(output_dir, 'rules.csv'))
                 rules_file = get_input("Enter the path to your rules CSV file", default_rules_path)
 
                 # Create a DataFrame for the new rule
-                new_rule = pd.DataFrame({
-                    'Source': [src], 'Destination': [dst], 'Service': [port], 'Action': [action]
+                new_rule_df = pd.DataFrame({
+                    'Source': [src], 'Destination': [dst], 'Service': [port], 'Action': [action], 'Comment': [comment]
                 })
 
-                # Append to the CSV file
+                # Append to the CSV file, creating it with a header if it doesn't exist
                 if os.path.exists(rules_file):
-                    new_rule.to_csv(rules_file, mode='a', header=False, index=False)
+                    # File exists, append without header
+                    new_rule_df.to_csv(rules_file, mode='a', header=False, index=False, sep=';')
                     print(f"Successfully appended the new rule to {rules_file}")
                 else:
-                    new_rule.to_csv(rules_file, mode='w', header=True, index=False)
+                    # File doesn't exist, write with header
+                    new_rule_df.to_csv(rules_file, mode='w', header=True, index=False, sep=';')
                     print(f"Successfully created {rules_file} with the new rule.")
 
             except Exception as e:
-                print(f"An error occurred while creating the rule: {e}")
+                print(f"An error occurred while creating the rule: {e}", file=sys.stderr)
+
+def _analyzer_process_logs(input_path, output_csv_path, output_summary_path):
+    """
+    Processes firewall log files to deduplicate entries and generate summaries.
+    This is the full, correct implementation.
+    """
+    # Step 1: Load data
+    df = None
+    if os.path.isdir(input_path):
+        print(f"Input path is a directory: {input_path}")
+        input_files = [os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith('.csv')]
+        if not input_files:
+            print("Error: No CSV files found in the directory.", file=sys.stderr)
+            return None
+        df_list = []
+        for f in input_files:
+            try:
+                df_temp = pd.read_csv(f, on_bad_lines='skip', encoding_errors='ignore', low_memory=False)
+                df_list.append(df_temp)
+            except Exception as e:
+                print(f"Error reading {f}: {e}", file=sys.stderr)
+        if not df_list:
+            print("Error: No valid CSV files could be processed.", file=sys.stderr)
+            return None
+        df = pd.concat(df_list, ignore_index=True)
+    elif os.path.isfile(input_path):
+        print(f"Input path is a single file: {input_path}")
+        try:
+            df = pd.read_csv(input_path, on_bad_lines='skip', encoding_errors='ignore', low_memory=False)
+        except Exception as e:
+            print(f"Error reading {input_path}: {e}", file=sys.stderr)
+            return None
+    else:
+        print(f"Error: Input path {input_path} is not a valid file or directory.", file=sys.stderr)
+        return None
+
+    print(f"Successfully loaded {len(df)} total rows.")
+
+    # Step 2: Clean and convert columns
+    required_cols = ['srcname', 'dstname', 'dstportname', 'time', 'rcvd', 'sent']
+    for col in required_cols:
+        if col not in df.columns:
+            print(f"Error: Required column '{col}' not found in the input data.", file=sys.stderr)
+            return None
+
+    df['time'] = pd.to_datetime(df['time'], errors='coerce')
+    df['rcvd'] = pd.to_numeric(df['rcvd'], errors='coerce').fillna(0)
+    df['sent'] = pd.to_numeric(df['sent'], errors='coerce').fillna(0)
+    df.dropna(subset=['srcname', 'dstname', 'dstportname', 'time'], inplace=True)
+
+    # Step 3: Sort by time and aggregate
+    df.sort_values('time', ascending=True, inplace=True)
+    group_keys = ['srcname', 'dstname', 'dstportname']
+    agg_dict = {'time': ['min', 'max'], 'rcvd': 'sum', 'sent': 'sum'}
+    first_cols = {col: 'first' for col in df.columns if col not in group_keys and col not in agg_dict}
+    agg_dict.update(first_cols)
+    aggregated_df = df.groupby(group_keys).agg(agg_dict)
+
+    # Step 4: Clean up aggregated dataframe
+    aggregated_df.columns = ['_'.join(col).strip() for col in aggregated_df.columns.values]
+    aggregated_df.rename(columns={'time_min': 'min_time', 'time_max': 'max_time', 'rcvd_sum': 'total_rcvd', 'sent_sum': 'total_sent'}, inplace=True)
+    aggregated_df['count'] = df.groupby(group_keys).size().values
+
+    output_cols = group_keys + ['count', 'min_time', 'max_time', 'total_rcvd', 'total_sent']
+    other_cols = [col for col in aggregated_df.columns if col not in output_cols]
+    final_cols = output_cols + sorted(other_cols)
+    aggregated_df = aggregated_df.reset_index()[final_cols]
+
+    # Step 5: Write cleaned data to CSV
+    aggregated_df.to_csv(output_csv_path, index=False)
+    print(f"Cleaned data with {len(aggregated_df)} unique flows written to {output_csv_path}")
+
+    # Step 6: Generate and write summary report
+    total_processed = len(df)
+    unique_flows = len(aggregated_df)
+    aggregated_df['total_traffic'] = aggregated_df['total_rcvd'] + aggregated_df['total_sent']
+    top_10_by_count = aggregated_df.sort_values('count', ascending=False).head(10)
+    top_10_by_traffic = aggregated_df.sort_values('total_traffic', ascending=False).head(10)
+
+    with open(output_summary_path, 'w') as f:
+        f.write("Firewall Log Analysis Summary\n" + "="*30 + "\n")
+        f.write(f"Total rows processed: {total_processed}\n")
+        f.write(f"Total unique flows identified: {unique_flows}\n\n")
+        f.write("Top 10 Flows by Count:\n" + "-"*25 + "\n")
+        f.write(top_10_by_count[['srcname', 'dstname', 'dstportname', 'count']].to_string(index=False))
+        f.write("\n\n")
+        f.write("Top 10 Flows by Total Traffic (Received + Sent):\n" + "-"*50 + "\n")
+        f.write(top_10_by_traffic[['srcname', 'dstname', 'dstportname', 'total_traffic', 'total_rcvd', 'total_sent']].to_string(index=False))
+        f.write("\n")
+
+    print(f"Summary report written to {output_summary_path}")
+    return aggregated_df
 
 def _execute_command_interactive(channel, command):
     """Executes a command in an interactive shell and returns the output."""
