@@ -33,17 +33,13 @@ def main():
         print("Please make sure a 'config.ini' file exists in the same directory as the script.")
         return
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Get relative paths from config
+    output_dir_name = config['Paths']['output_dir']
+    reference_dir_name = config['Paths']['reference_dir']
 
-    # Create output directories if they don't exist, making paths absolute
-    output_dir = os.path.join(script_dir, config['Paths']['output_dir'])
-    reference_dir = os.path.join(script_dir, config['Paths']['reference_dir'])
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(reference_dir, exist_ok=True)
-
-    # Overwrite the config paths with absolute paths for robustness
-    config['Paths']['output_dir'] = output_dir
-    config['Paths']['reference_dir'] = reference_dir
+    # Create directories relative to the current working directory
+    os.makedirs(output_dir_name, exist_ok=True)
+    os.makedirs(reference_dir_name, exist_ok=True)
 
     while True:
         choice = main_menu()
