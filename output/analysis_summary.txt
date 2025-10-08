@@ -1,0 +1,11 @@
+Firewall Log Analysis Summary
+==============================
+Total rows processed: 4
+Total unique flows identified: 3
+
+Top 10 Flows by Count:
+-------------------------
+     srcname    dstname dstportname  count
+workstation1    server1       https      2
+workstation1 ssh-server         ssh      1
+workstation2 web-server        http      1

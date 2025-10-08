@@ -1,0 +1,6 @@
+# Generated on 2025-10-08 09:24:10
+# Source CSV: stormshield_suite/all_in_one/dummy_rules.csv
+
+
+
+CONFIG FILTER ACTIVATE
