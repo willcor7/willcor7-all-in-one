@@ -501,7 +501,7 @@ def _export_logic(host, user, password, output_dir):
         time.sleep(1)
         channel.send(password + '\n')
         time.sleep(2)
-        channel.recv(6553_Z) # Clear the response after entering password
+        channel.recv(65535) # Clear the response after entering password
         print("Entered 'cli' mode.")
 
         print("-> Exporting objects and interfaces...")
