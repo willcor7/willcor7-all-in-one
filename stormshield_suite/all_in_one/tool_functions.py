@@ -697,16 +697,18 @@ def compare_rules(config):
 
     # --- Load Rules ---
     source_rules, final_rules = [], []
-    for path in source_paths:
-        if os.path.exists(path):
+    for path_str in source_paths:
+        path = Path(path_str)
+        if path.exists():
             source_rules.extend(_converter_read_csv(path))
         else:
             print(f"Warning: Source file not found: {path}")
 
-    if os.path.exists(final_csv_path):
-        final_rules = _converter_read_csv(final_csv_path)
+    final_path = Path(final_csv_path)
+    if final_path.exists():
+        final_rules = _converter_read_csv(final_path)
     else:
-        print(f"Error: Final file not found: {final_csv_path}")
+        print(f"Error: Final file not found: {final_path}")
         return
 
     # --- Find Missing Rules and Generate Commands ---
@@ -717,11 +719,13 @@ def compare_rules(config):
 
     print(f"\nFound {len(missing_rules)} missing rules. Generating commands...")
 
+    # --- Get generation options for missing rules ---
+    slot = int(get_input("Enter the filter policy slot for missing rules", "9"))
+    start_pos = int(get_input("Enter the starting position for missing rules", "1"))
+
     cli_commands = []
-    for i, rule in enumerate(missing_rules, start=1):
-        # TODO: The _build_rule_cmd function is not defined and its signature is likely
-        # incompatible with the newer _converter_build_filter_cmd. This function needs refactoring.
-        cmd, err = _build_rule_cmd(rule, i)
+    for i, rule in enumerate(missing_rules, start=start_pos):
+        cmd, err = _converter_build_filter_cmd(rule, "MissingRule-", slot, i)
         if cmd:
             cli_commands.append(cmd)
         else:
@@ -784,12 +788,13 @@ def detect_duplicates(config):
         return
 
     all_rows = []
-    for path in paths:
-        if os.path.exists(path):
+    for path_str in paths:
+        path = Path(path_str)
+        if path.exists():
             rows = _converter_read_csv(path)
             # Add source file information to each row for better reporting
             for row in rows:
-                row['source_file'] = os.path.basename(path)
+                row['source_file'] = path.name
             all_rows.extend(rows)
         else:
             print(f"Warning: File not found and will be skipped: {path}")
