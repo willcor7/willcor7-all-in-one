@@ -300,8 +300,11 @@ def analyze_logs(config):
         top_flows_display.index = range(1, len(top_flows_display) + 1)
         print(top_flows_display.to_string())
 
-        create_rule = input("\nWould you like to create a new firewall rule based on one of these flows? (yes/no): ").lower()
-        if create_rule == 'yes':
+        while True:
+            create_rule = input("\nWould you like to create a new firewall rule from this list? (yes/no): ").lower()
+            if create_rule != 'yes':
+                break
+
             selected_flow = None
             while True:
                 try:
@@ -343,7 +346,7 @@ def analyze_logs(config):
                         print(f"  - {dep_type}: {name}", file=sys.stderr)
                     if get_input("Continue anyway? (yes/no)", "no").lower() != 'yes':
                         print("Rule creation cancelled.")
-                        return
+                        continue # Go to the next iteration of the main loop
 
                 # --- Get generation options ---
                 slot = int(get_input("Enter the filter policy slot (index)", "9"))
@@ -354,7 +357,7 @@ def analyze_logs(config):
 
                 if err:
                     print(f"\n[ERROR] Could not generate command: {err}", file=sys.stderr)
-                    return
+                    continue # Go to the next iteration of the main loop
 
                 # --- Append command to file ---
                 default_cli_path = os.path.join(output_dir, 'generated_rules_from_logs.txt')
