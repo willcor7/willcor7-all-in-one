@@ -734,12 +734,31 @@ def compare_rules(config):
     # --- Write Output ---
     if cli_commands:
         output_dir = config.get('Paths', 'output_dir')
+
+        # --- Write CLI commands file ---
         output_path = os.path.join(output_dir, "missing_rules_commands.txt")
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(f"# Generated on {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("# Commands to add rules that are missing from the final configuration.\n\n")
-            f.write("\n".join(cli_commands))
+            f.write(f"# {len(cli_commands)} commands to add rules that are missing from the final configuration.\n\n")
+            for i, cmd in enumerate(cli_commands):
+                f.write(cmd + "\n")
+                if (i + 1) % 10 == 0:
+                    f.write("\n")
         print(f"Successfully wrote {len(cli_commands)} commands to: {output_path}")
+
+        # --- Write summary file ---
+        summary_path = os.path.join(output_dir, "missing_rules_summary.csv")
+        try:
+            missing_rules_df = pd.DataFrame(missing_rules)
+            summary_cols = ['rule_name', 'from_src', 'to_dest', 'service', 'action', 'comment']
+            existing_cols = [col for col in summary_cols if col in missing_rules_df.columns]
+            if existing_cols:
+                missing_rules_df[existing_cols].to_csv(summary_path, index=False, sep=';')
+                print(f"Successfully wrote summary of {len(missing_rules_df)} missing rules to: {summary_path}")
+            else:
+                print("No relevant columns found to create a summary file.")
+        except Exception as e:
+            print(f"Could not write summary file: {e}", file=sys.stderr)
 
 def _find_and_report_duplicates_logic(rows: list):
     """Analyzes rows, identifies duplicates, and prints a report."""
