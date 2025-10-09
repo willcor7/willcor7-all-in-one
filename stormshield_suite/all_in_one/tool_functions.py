@@ -38,18 +38,34 @@ def analyze_logs(config):
         print("\n--- Rule Creation Suggestion ---")
         top_flows = aggregated_df.sort_values('count', ascending=False).head(10)
         print("Based on the analysis, here are the top 10 flows by count:")
-        print(top_flows[['srcname', 'dstname', 'dstportname', 'count']].to_string(index=False))
+
+        # Display numbered flows
+        top_flows_display = top_flows[['srcname', 'dstname', 'dstportname', 'count']].copy()
+        top_flows_display.index = range(1, len(top_flows_display) + 1)
+        print(top_flows_display.to_string())
 
         create_rule = input("\nWould you like to create a new firewall rule based on one of these flows? (yes/no): ").lower()
         if create_rule == 'yes':
+            selected_flow = None
+            while True:
+                try:
+                    flow_choice = int(get_input("Enter the number of the flow to use for the rule", "1"))
+                    if 1 <= flow_choice <= len(top_flows):
+                        selected_flow = top_flows.iloc[flow_choice - 1]
+                        break
+                    else:
+                        print("Invalid number. Please choose a number from the list.", file=sys.stderr)
+                except ValueError:
+                    print("Invalid input. Please enter a number.", file=sys.stderr)
+
             print("\n--- Create a New Rule ---")
             print("This feature will append the new rule to a CSV file.")
 
             try:
-                # Get rule details from user
-                src = get_input("Enter the source object name (e.g., from 'srcname' column)")
-                dst = get_input("Enter the destination object name (e.g., from 'dstname' column)")
-                port = get_input("Enter the service/port name (e.g., from 'dstportname' column)")
+                # Get rule details from user, with defaults from the selected flow
+                src = get_input("Enter the source object name", selected_flow['srcname'])
+                dst = get_input("Enter the destination object name", selected_flow['dstname'])
+                port = get_input("Enter the service/port name", selected_flow['dstportname'])
                 action = get_input("Enter the action (pass/block)", "pass")
                 comment = get_input("Enter a comment for the rule (optional)", f"Rule for {src} to {dst}")
 
