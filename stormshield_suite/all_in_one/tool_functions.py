@@ -39,6 +39,7 @@ _CONVERTER_CSV_TO_NSRPC_MAP = {
     "nat_to_load_balancing": "natdstlb",
 }
 _CONVERTER_CSV_ALIASES = {
+    "rule_name": ["rule_name", "rulename", "rule name"],
     "service": ["service", "to_port", "dstport"], "from_src": ["from_src", "source"],
     "to_dest": ["to_dest", "destination"], "nat_from_target": ["nat_from_target", "natsrctarget"],
     "nat_to_target": ["nat_to_target", "natdsttarget"], "nat_to_port": ["nat_to_port", "natdstport"],
@@ -797,22 +798,26 @@ def _find_and_report_duplicates_logic(rows: list, output_dir: str):
         print(f"Reports written to {output_dir}")
         return
 
+    # Get the policy slot from the user once
+    slot_index = get_input("Enter the policy slot index to generate deletion commands for", "9")
+
     for sig, occs in duplicates_map.items():
         first_occurrence = occs[0]
         duplicate_occs = occs[1:]
 
         print(f"\n[DUPLICATE FOUND] - Signature: (Source: {sig[0]}, Destination: {sig[1]}, Service: {sig[2]}, Action: {sig[3]})")
-        print(f"  - Original found in: '{first_occurrence.get('source_file', 'N/A')}' (Rule: '{_converter_pick(first_occurrence, ['rulename', 'rule name'])}')")
+        print(f"  - Original found in: '{first_occurrence.get('source_file', 'N/A')}' (Rule: '{_converter_pick(first_occurrence, _CONVERTER_CSV_ALIASES.get('rule_name'))}')")
 
         full_report_rows.extend(occs)
 
         for dup_row in duplicate_occs:
-            print(f"  - Duplicate found in: '{dup_row.get('source_file', 'N/A')}' (Rule: '{_converter_pick(dup_row, ['rulename', 'rule name'])}')")
-            rulename = _converter_pick(dup_row, ["rulename", "rule name"])
+            print(f"  - Duplicate found in: '{dup_row.get('source_file', 'N/A')}' (Rule: '{_converter_pick(dup_row, _CONVERTER_CSV_ALIASES.get('rule_name'))}')")
+            rulename = _converter_pick(dup_row, _CONVERTER_CSV_ALIASES.get('rule_name'))
             if rulename:
+                rule_type = "nat" if _converter_classify_row(dup_row) == "NAT" else "filter"
                 formatted_rulename = _converter_format_nsrpc_param(rulename)
-                command = f"CONFIG FILTER RULE DELETE rulename={formatted_rulename}"
-                comment = (f"# Deletes duplicate of rule '{_converter_pick(first_occurrence, ['rulename', 'rule name'])}' "
+                command = f"CONFIG FILTER RULE REMOVE index={slot_index} type={rule_type} name={formatted_rulename}"
+                comment = (f"# Deletes duplicate of rule '{_converter_pick(first_occurrence, _CONVERTER_CSV_ALIASES.get('rule_name'))}' "
                            f"from file '{first_occurrence.get('source_file', 'N/A')}'.")
                 deletion_commands.append(f"{comment}\n{command}")
             else:
