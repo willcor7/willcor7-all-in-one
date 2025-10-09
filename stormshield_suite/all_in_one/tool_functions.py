@@ -761,55 +761,84 @@ def compare_rules(config):
             print(f"Could not write summary file: {e}", file=sys.stderr)
 
 def _find_and_report_duplicates_logic(rows: list, output_dir: str):
-    """Analyzes rows, identifies duplicates, prints a report, and saves it to a file."""
+    """Analyzes rows, identifies duplicates, and generates deletion script and full report."""
     seen_rules = {}
 
-    for row in rows:
-        # Create a normalized signature for the rule
+    # Use a copy to avoid modifying the original list of dicts from other functions
+    all_rows = [row.copy() for row in rows]
+
+    for i, row in enumerate(all_rows):
+        row['original_index'] = i # Keep track of original position for reference
         source = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("from_src", ["from_src"])) or "any"
         destination = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("to_dest", ["to_dest"])) or "any"
         service = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("service", ["service"])) or "any"
-        action = _converter_pick(row, ['action']) or "pass" # Default to pass if action is missing
+        action = _converter_pick(row, ['action']) or "pass"
         signature = (source, destination, service, action)
+        seen_rules.setdefault(signature, []).append(row)
 
-        # Store the occurrence details
-        occurrence = {
-            "file": row.get("source_file", "N/A"),
-            "name": _converter_pick(row, ["rule name", "rulename", "comment"]) or "Unnamed Rule"
-        }
-        seen_rules.setdefault(signature, []).append(occurrence)
+    # --- Data collection ---
+    full_report_rows = []
+    deletion_commands = []
 
-    # Filter for duplicates and prepare data for reporting
-    duplicates = {sig: occs for sig, occs in seen_rules.items() if len(occs) > 1}
-    report_path = os.path.join(output_dir, "duplicate_rules_report.csv")
+    duplicates_map = {sig: occs for sig, occs in seen_rules.items() if len(occs) > 1}
 
     print("\n--- Duplicate Rules Report ---")
-    if not duplicates:
+
+    # --- File Generation ---
+    delete_script_path = os.path.join(output_dir, "delete_duplicate_rules.txt")
+    full_report_path = os.path.join(output_dir, "duplicate_rules_full_report.csv")
+
+    if not duplicates_map:
         print("No duplicate rules were found.")
-        with open(report_path, 'w', encoding='utf-8', newline='') as f:
+        with open(delete_script_path, 'w', encoding='utf-8') as f:
+            f.write("# No duplicate rules found to delete.\n")
+        with open(full_report_path, 'w', encoding='utf-8', newline='') as f:
             f.write("No duplicate rules were found.\n")
-        print(f"Report written to {report_path}")
+        print(f"Reports written to {output_dir}")
         return
 
-    report_data = []
-    for sig, occs in duplicates.items():
-        # Print to console
-        print(f"\n[DUPLICATE FOUND] - Signature: (Source: {sig[0]}, Destination: {sig[1]}, Service: {sig[2]}, Action: {sig[3]})")
-        print(f"  This rule was found {len(occs)} times:")
-        for occ in occs:
-            print(f"  - In File: {occ['file']}, Rule Name: \"{occ['name']}\"")
-            # Append data for CSV report
-            report_data.append({
-                'Source': sig[0], 'Destination': sig[1], 'Service': sig[2], 'Action': sig[3],
-                'Found_In_File': occ['file'], 'Rule_Name_Or_Comment': occ['name']
-            })
+    for sig, occs in duplicates_map.items():
+        first_occurrence = occs[0]
+        duplicate_occs = occs[1:]
 
-    # Write report file
+        print(f"\n[DUPLICATE FOUND] - Signature: (Source: {sig[0]}, Destination: {sig[1]}, Service: {sig[2]}, Action: {sig[3]})")
+        print(f"  - Original found in: '{first_occurrence.get('source_file', 'N/A')}' (Rule: '{_converter_pick(first_occurrence, ['rulename', 'rule name'])}')")
+
+        full_report_rows.extend(occs)
+
+        for dup_row in duplicate_occs:
+            print(f"  - Duplicate found in: '{dup_row.get('source_file', 'N/A')}' (Rule: '{_converter_pick(dup_row, ['rulename', 'rule name'])}')")
+            rulename = _converter_pick(dup_row, ["rulename", "rule name"])
+            if rulename:
+                formatted_rulename = _converter_format_nsrpc_param(rulename)
+                command = f"CONFIG FILTER RULE DELETE rulename={formatted_rulename}"
+                comment = (f"# Deletes duplicate of rule '{_converter_pick(first_occurrence, ['rulename', 'rule name'])}' "
+                           f"from file '{first_occurrence.get('source_file', 'N/A')}'.")
+                deletion_commands.append(f"{comment}\n{command}")
+            else:
+                no_name_comment = (f"# WARNING: Cannot generate delete command for rule from file "
+                                   f"'{dup_row.get('source_file', 'N/A')}' (original index {dup_row['original_index']}) "
+                                   f"because it has no 'rulename'.")
+                deletion_commands.append(no_name_comment)
+
+    # --- Write Deletion Script ---
+    with open(delete_script_path, 'w', encoding='utf-8') as f:
+        f.write(f"# Generated on {datetime.datetime.now().isoformat(timespec='seconds')}\n")
+        f.write(f"# This script contains commands to delete {len(deletion_commands)} duplicate rules.\n")
+        f.write("# The first-encountered instance of each rule is kept.\n\n")
+        f.write("\n\n".join(deletion_commands))
+    print(f"\nSuccessfully wrote {len(deletion_commands)} deletion commands to: {delete_script_path}")
+
+    # --- Write Full CSV Report ---
     try:
-        pd.DataFrame(report_data).to_csv(report_path, index=False, sep=';')
-        print(f"\nSuccessfully wrote duplicate rules report to: {report_path}")
+        duplicate_df = pd.DataFrame(full_report_rows)
+        if 'original_index' in duplicate_df.columns:
+            duplicate_df.drop(columns=['original_index'], inplace=True)
+
+        duplicate_df.to_csv(full_report_path, index=False, sep=';', encoding='utf-8-sig')
+        print(f"Successfully wrote a full report of {len(duplicate_df)} rules involved in duplicates to: {full_report_path}")
     except Exception as e:
-        print(f"\nCould not write duplicate rules report: {e}", file=sys.stderr)
+        print(f"Could not write full duplicate report: {e}", file=sys.stderr)
 
 def detect_duplicates(config):
     """Orchestrates the duplicate rule detection process."""
