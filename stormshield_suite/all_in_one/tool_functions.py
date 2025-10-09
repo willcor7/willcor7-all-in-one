@@ -760,8 +760,8 @@ def compare_rules(config):
         except Exception as e:
             print(f"Could not write summary file: {e}", file=sys.stderr)
 
-def _find_and_report_duplicates_logic(rows: list):
-    """Analyzes rows, identifies duplicates, and prints a report."""
+def _find_and_report_duplicates_logic(rows: list, output_dir: str):
+    """Analyzes rows, identifies duplicates, prints a report, and saves it to a file."""
     seen_rules = {}
 
     for row in rows:
@@ -770,7 +770,6 @@ def _find_and_report_duplicates_logic(rows: list):
         destination = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("to_dest", ["to_dest"])) or "any"
         service = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("service", ["service"])) or "any"
         action = _converter_pick(row, ['action']) or "pass" # Default to pass if action is missing
-
         signature = (source, destination, service, action)
 
         # Store the occurrence details
@@ -780,19 +779,37 @@ def _find_and_report_duplicates_logic(rows: list):
         }
         seen_rules.setdefault(signature, []).append(occurrence)
 
-    # Filter for duplicates and report them
+    # Filter for duplicates and prepare data for reporting
     duplicates = {sig: occs for sig, occs in seen_rules.items() if len(occs) > 1}
+    report_path = os.path.join(output_dir, "duplicate_rules_report.csv")
 
     print("\n--- Duplicate Rules Report ---")
     if not duplicates:
         print("No duplicate rules were found.")
+        with open(report_path, 'w', encoding='utf-8', newline='') as f:
+            f.write("No duplicate rules were found.\n")
+        print(f"Report written to {report_path}")
         return
 
+    report_data = []
     for sig, occs in duplicates.items():
+        # Print to console
         print(f"\n[DUPLICATE FOUND] - Signature: (Source: {sig[0]}, Destination: {sig[1]}, Service: {sig[2]}, Action: {sig[3]})")
         print(f"  This rule was found {len(occs)} times:")
         for occ in occs:
             print(f"  - In File: {occ['file']}, Rule Name: \"{occ['name']}\"")
+            # Append data for CSV report
+            report_data.append({
+                'Source': sig[0], 'Destination': sig[1], 'Service': sig[2], 'Action': sig[3],
+                'Found_In_File': occ['file'], 'Rule_Name_Or_Comment': occ['name']
+            })
+
+    # Write report file
+    try:
+        pd.DataFrame(report_data).to_csv(report_path, index=False, sep=';')
+        print(f"\nSuccessfully wrote duplicate rules report to: {report_path}")
+    except Exception as e:
+        print(f"\nCould not write duplicate rules report: {e}", file=sys.stderr)
 
 def detect_duplicates(config):
     """Orchestrates the duplicate rule detection process."""
@@ -800,7 +817,6 @@ def detect_duplicates(config):
 
     # Get user input for CSV files
     csv_path_str = get_input("Enter the path(s) to your CSV file(s) (comma-separated)", config.get('Paths', 'rules_csv_path', fallback=""))
-
     paths = [p.strip() for p in csv_path_str.split(',') if p.strip()]
     if not paths:
         print("Error: No CSV files provided.")
@@ -811,7 +827,6 @@ def detect_duplicates(config):
         path = Path(path_str)
         if path.exists():
             rows = _converter_read_csv(path)
-            # Add source file information to each row for better reporting
             for row in rows:
                 row['source_file'] = path.name
             all_rows.extend(rows)
@@ -822,4 +837,5 @@ def detect_duplicates(config):
         print("Could not load any rules to analyze.")
         return
 
-    _find_and_report_duplicates_logic(all_rows)
+    output_dir = config.get('Paths', 'output_dir')
+    _find_and_report_duplicates_logic(all_rows, output_dir)
