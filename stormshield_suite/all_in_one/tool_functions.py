@@ -6,297 +6,16 @@ import configparser
 import re
 import time
 import sys
+import unicodedata
+import csv
+from pathlib import Path
+from itertools import zip_longest
+import datetime
 
 # A helper function to get user input with a default value from config
 def get_input(prompt, default=""):
     """Prompts the user for input, showing a default value."""
     return input(f"{prompt} [default: {default}]: ") or default
-
-def analyze_logs(config):
-    """
-    Orchestrates the log analysis process using the full implementation.
-    """
-    print("\n--- Analyze Firewall Logs ---")
-    # Get paths from config or user input
-    default_log_path = config.get('Paths', 'log_file_path', fallback="")
-    log_path = get_input(f"Enter the path to the log file or directory", default_log_path)
-
-    if not os.path.exists(log_path):
-        print(f"Error: The path '{log_path}' does not exist.", file=sys.stderr)
-        return
-
-    # Define output paths using os.path.join for compatibility
-    output_dir = config.get('Paths', 'output_dir')
-    output_csv_path = os.path.join(output_dir, 'analyzed_logs.csv')
-    output_summary_path = os.path.join(output_dir, 'analysis_summary.txt')
-
-    # Run the analysis
-    aggregated_df = _analyzer_process_logs(log_path, output_csv_path, output_summary_path)
-
-    # Smart feature: Suggest creating a rule
-    if aggregated_df is not None and not aggregated_df.empty:
-        print("\n--- Rule Creation Suggestion ---")
-        top_flows = aggregated_df.sort_values('count', ascending=False).head(10)
-        print("Based on the analysis, here are the top 10 flows by count:")
-
-        # Display numbered flows
-        top_flows_display = top_flows[['srcname', 'dstname', 'dstportname', 'count']].copy()
-        top_flows_display.index = range(1, len(top_flows_display) + 1)
-        print(top_flows_display.to_string())
-
-        create_rule = input("\nWould you like to create a new firewall rule based on one of these flows? (yes/no): ").lower()
-        if create_rule == 'yes':
-            selected_flow = None
-            while True:
-                try:
-                    flow_choice = int(get_input("Enter the number of the flow to use for the rule", "1"))
-                    if 1 <= flow_choice <= len(top_flows):
-                        selected_flow = top_flows.iloc[flow_choice - 1]
-                        break
-                    else:
-                        print("Invalid number. Please choose a number from the list.", file=sys.stderr)
-                except ValueError:
-                    print("Invalid input. Please enter a number.", file=sys.stderr)
-
-            print("\n--- Create a New Rule ---")
-            print("This feature will append the new rule to a CSV file.")
-
-            try:
-                # Get rule details from user, with defaults from the selected flow
-                src = get_input("Enter the source object name", selected_flow['srcname'])
-                dst = get_input("Enter the destination object name", selected_flow['dstname'])
-                port = get_input("Enter the service/port name", selected_flow['dstportname'])
-                action = get_input("Enter the action (pass/block)", "pass")
-                comment = get_input("Enter a comment for the rule (optional)", f"Rule for {src} to {dst}")
-
-                # Get the rules file path
-                default_rules_path = config.get('Paths', 'rules_csv_path', fallback=os.path.join(output_dir, 'rules.csv'))
-                rules_file = get_input("Enter the path to your rules CSV file", default_rules_path)
-
-                # Create a DataFrame for the new rule
-                new_rule_df = pd.DataFrame({
-                    'Source': [src], 'Destination': [dst], 'Service': [port], 'Action': [action], 'Comment': [comment]
-                })
-
-                # Append to the CSV file, creating it with a header if it doesn't exist
-                if os.path.exists(rules_file):
-                    # File exists, append without header
-                    new_rule_df.to_csv(rules_file, mode='a', header=False, index=False, sep=';')
-                    print(f"Successfully appended the new rule to {rules_file}")
-                else:
-                    # File doesn't exist, write with header
-                    new_rule_df.to_csv(rules_file, mode='w', header=True, index=False, sep=';')
-                    print(f"Successfully created {rules_file} with the new rule.")
-
-            except Exception as e:
-                print(f"An error occurred while creating the rule: {e}", file=sys.stderr)
-
-def _analyzer_process_logs(input_path, output_csv_path, output_summary_path):
-    """
-    Processes firewall log files to deduplicate entries and generate summaries.
-    This is the full, correct implementation.
-    """
-    # Step 1: Load data
-    df = None
-    if os.path.isdir(input_path):
-        print(f"Input path is a directory: {input_path}")
-        input_files = [os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith('.csv')]
-        if not input_files:
-            print("Error: No CSV files found in the directory.", file=sys.stderr)
-            return None
-        df_list = []
-        for f in input_files:
-            try:
-                df_temp = pd.read_csv(f, on_bad_lines='skip', encoding_errors='ignore', low_memory=False)
-                df_list.append(df_temp)
-            except Exception as e:
-                print(f"Error reading {f}: {e}", file=sys.stderr)
-        if not df_list:
-            print("Error: No valid CSV files could be processed.", file=sys.stderr)
-            return None
-        df = pd.concat(df_list, ignore_index=True)
-    elif os.path.isfile(input_path):
-        print(f"Input path is a single file: {input_path}")
-        try:
-            df = pd.read_csv(input_path, on_bad_lines='skip', encoding_errors='ignore', low_memory=False)
-        except Exception as e:
-            print(f"Error reading {input_path}: {e}", file=sys.stderr)
-            return None
-    else:
-        print(f"Error: Input path {input_path} is not a valid file or directory.", file=sys.stderr)
-        return None
-
-    print(f"Successfully loaded {len(df)} total rows.")
-
-    # Step 2: Clean and convert columns
-    required_cols = ['srcname', 'dstname', 'dstportname', 'time', 'rcvd', 'sent']
-    for col in required_cols:
-        if col not in df.columns:
-            print(f"Error: Required column '{col}' not found in the input data.", file=sys.stderr)
-            return None
-
-    df['time'] = pd.to_datetime(df['time'], errors='coerce')
-    df['rcvd'] = pd.to_numeric(df['rcvd'], errors='coerce').fillna(0)
-    df['sent'] = pd.to_numeric(df['sent'], errors='coerce').fillna(0)
-    df.dropna(subset=['srcname', 'dstname', 'dstportname', 'time'], inplace=True)
-
-    # Step 3: Sort by time and aggregate
-    df.sort_values('time', ascending=True, inplace=True)
-    group_keys = ['srcname', 'dstname', 'dstportname']
-    agg_dict = {'time': ['min', 'max'], 'rcvd': 'sum', 'sent': 'sum'}
-    first_cols = {col: 'first' for col in df.columns if col not in group_keys and col not in agg_dict}
-    agg_dict.update(first_cols)
-    aggregated_df = df.groupby(group_keys).agg(agg_dict)
-
-    # Step 4: Clean up aggregated dataframe
-    aggregated_df.columns = ['_'.join(col).strip() for col in aggregated_df.columns.values]
-    aggregated_df.rename(columns={'time_min': 'min_time', 'time_max': 'max_time', 'rcvd_sum': 'total_rcvd', 'sent_sum': 'total_sent'}, inplace=True)
-    aggregated_df['count'] = df.groupby(group_keys).size().values
-
-    output_cols = group_keys + ['count', 'min_time', 'max_time', 'total_rcvd', 'total_sent']
-    other_cols = [col for col in aggregated_df.columns if col not in output_cols]
-    final_cols = output_cols + sorted(other_cols)
-    aggregated_df = aggregated_df.reset_index()[final_cols]
-
-    # Step 5: Write cleaned data to CSV
-    aggregated_df.to_csv(output_csv_path, index=False)
-    print(f"Cleaned data with {len(aggregated_df)} unique flows written to {output_csv_path}")
-
-    # Step 6: Generate and write summary report
-    total_processed = len(df)
-    unique_flows = len(aggregated_df)
-    aggregated_df['total_traffic'] = aggregated_df['total_rcvd'] + aggregated_df['total_sent']
-    top_10_by_count = aggregated_df.sort_values('count', ascending=False).head(10)
-    top_10_by_traffic = aggregated_df.sort_values('total_traffic', ascending=False).head(10)
-
-    with open(output_summary_path, 'w') as f:
-        f.write("Firewall Log Analysis Summary\n" + "="*30 + "\n")
-        f.write(f"Total rows processed: {total_processed}\n")
-        f.write(f"Total unique flows identified: {unique_flows}\n\n")
-        f.write("Top 10 Flows by Count:\n" + "-"*25 + "\n")
-        f.write(top_10_by_count[['srcname', 'dstname', 'dstportname', 'count']].to_string(index=False))
-        f.write("\n\n")
-        f.write("Top 10 Flows by Total Traffic (Received + Sent):\n" + "-"*50 + "\n")
-        f.write(top_10_by_traffic[['srcname', 'dstname', 'dstportname', 'total_traffic', 'total_rcvd', 'total_sent']].to_string(index=False))
-        f.write("\n")
-
-    print(f"Summary report written to {output_summary_path}")
-    return aggregated_df
-
-def _execute_command_interactive(channel, command):
-    """Executes a command in an interactive shell and returns the output."""
-    channel.send(command + '\n')
-    time.sleep(3)  # Wait for the command to execute
-    output = ""
-    while channel.recv_ready():
-        output += channel.recv(65535).decode('utf-8', errors='ignore')
-    # Clean up the output to remove the command echo and prompt
-    lines = output.splitlines()
-    return "\n".join(lines[1:-1]) if len(lines) > 2 else ""
-
-def _export_logic(host, user, password, output_dir):
-    """Connects to the firewall and exports configuration."""
-    client = None
-    try:
-        print(f"Connecting to {host} as {user}...")
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(hostname=host, username=user, password=password, port=22, timeout=15)
-        print("SSH connection successful.")
-
-        # Use a timestamp for unique filenames
-        timestamp = time.strftime('%Y%m%d_%H%M%S')
-
-        def save_output(basename, content):
-            filename = f"export_{basename}_{timestamp}.txt"
-            filepath = os.path.join(output_dir, filename)
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(content)
-            print(f"   -> Output saved to '{filepath}'")
-
-        print("\n--- Exporting 'CONFIG' data ---")
-        channel = client.invoke_shell()
-        time.sleep(1)
-        channel.recv(65535)  # Clear initial banner
-        channel.send('cli\n')
-        time.sleep(1)
-        channel.send(password + '\n')
-        time.sleep(2)
-        channel.recv(65535) # Clear the response after entering password
-        print("Entered 'cli' mode.")
-
-        print("-> Exporting objects and interfaces...")
-        save_output("objects", _execute_command_interactive(channel, "CONFIG OBJECT LIST type=all usage=any"))
-        save_output("interfaces", _execute_command_interactive(channel, "CONFIG NETWORK INTERFACE SHOW"))
-
-        channel.close()
-        return True
-
-    except paramiko.AuthenticationException:
-        print("Authentication failed. Please check your username and password.", file=sys.stderr)
-        return False
-    except Exception as e:
-        print(f"An error occurred: {e}", file=sys.stderr)
-        return False
-    finally:
-        if client:
-            client.close()
-            print("\nSSH connection closed.")
-
-def export_config(config):
-    """Orchestrates the firewall configuration export."""
-    host = get_input("Enter the firewall IP address", config.get('Exporter', 'firewall_ip', fallback=""))
-    user = get_input("Enter the firewall username", config.get('Exporter', 'firewall_user', fallback="admin"))
-
-    if not host or not user:
-        print("Error: Firewall IP and username are required.")
-        return
-
-    # Securely get password
-    password = config.get('Exporter', 'firewall_password', fallback="")
-    if not password:
-        password = getpass.getpass(f"Enter password for {user}@{host}: ")
-
-    # Get the output directory from config
-    output_dir = config.get('Paths', 'reference_dir')
-    os.makedirs(output_dir, exist_ok=True) # Ensure it exists
-    print(f"Files will be saved in: '{output_dir}'")
-
-    if _export_logic(host, user, password, output_dir):
-        print("\nExport completed successfully.")
-    else:
-        print("\nExport failed.")
-
-import unicodedata
-import csv
-import time
-from pathlib import Path
-
-# --- Constants from converter.py ---
-MAX_NSRPC_LINE = 1024
-ALLOWED_ACTIONS = {"pass", "block", "drop", "bypass", "deleg", "reset", "log", "decrypt", "nat"}
-CSV_TO_NSRPC_MAP = {
-    "rule_name": "rulename", "comment": "comment", "state": "state", "action": "action",
-    "service": "service", "log_level": "loglevel", "schedule": "schedule",
-    "from_src": "srctarget", "from_if": "srcif", "to_dest": "dsttarget", "to_if": "dstif",
-    "nat_from_target": "natsrctarget", "nat_to_target": "natdsttarget", "nat_to_port": "natdstport"
-}
-CSV_ALIASES = {
-    "service": ["service", "to_port", "dstport"], "from_src": ["from_src", "source"],
-    "to_dest": ["to_dest", "destination"], "nat_from_target": ["nat_from_target", "natsrctarget"],
-    "nat_to_target": ["nat_to_target", "natdsttarget"], "nat_to_port": ["nat_to_port", "natdstport"],
-}
-VALID_FILTER_TOKENS = {
-    "rulename", "comment", "state", "action", "inspection", "service", "loglevel",
-    "schedule", "srctarget", "srcif", "dsttarget", "dstif"
-}
-
-# --- Helper functions from converter.py, adapted for integration ---
-
-from itertools import zip_longest
-from pathlib import Path
-import unicodedata
-import datetime
 
 # --- Start of Converter Script Logic ---
 
@@ -324,6 +43,10 @@ _CONVERTER_CSV_ALIASES = {
     "to_dest": ["to_dest", "destination"], "nat_from_target": ["nat_from_target", "natsrctarget"],
     "nat_to_target": ["nat_to_target", "natdsttarget"], "nat_to_port": ["nat_to_port", "natdstport"],
     "log_level": ["log_level", "loglevel"],
+}
+VALID_FILTER_TOKENS = {
+    "rulename", "comment", "state", "action", "inspection", "service", "loglevel",
+    "schedule", "srctarget", "srcif", "dsttarget", "dstif"
 }
 _CONVERTER_VALID_FILTER_TOKENS = {
     "rulename", "comment", "state", "action", "count", "rate", "settos",
@@ -545,6 +268,284 @@ def _find_latest_ref_file(directory: str, keyword: str) -> str:
 
 # --- End of Converter Script Logic ---
 
+def analyze_logs(config):
+    """
+    Orchestrates the log analysis process using the full implementation.
+    """
+    print("\n--- Analyze Firewall Logs ---")
+    # Get paths from config or user input
+    default_log_path = config.get('Paths', 'log_file_path', fallback="")
+    log_path = get_input(f"Enter the path to the log file or directory", default_log_path)
+
+    if not os.path.exists(log_path):
+        print(f"Error: The path '{log_path}' does not exist.", file=sys.stderr)
+        return
+
+    # Define output paths using os.path.join for compatibility
+    output_dir = config.get('Paths', 'output_dir')
+    output_csv_path = os.path.join(output_dir, 'analyzed_logs.csv')
+    output_summary_path = os.path.join(output_dir, 'analysis_summary.txt')
+
+    # Run the analysis
+    aggregated_df = _analyzer_process_logs(log_path, output_csv_path, output_summary_path)
+
+    # Smart feature: Suggest creating a rule
+    if aggregated_df is not None and not aggregated_df.empty:
+        print("\n--- Rule Creation Suggestion ---")
+        top_flows = aggregated_df.sort_values('count', ascending=False).head(10)
+        print("Based on the analysis, here are the top 10 flows by count:")
+
+        # Display numbered flows
+        top_flows_display = top_flows[['srcname', 'dstname', 'dstportname', 'count']].copy()
+        top_flows_display.index = range(1, len(top_flows_display) + 1)
+        print(top_flows_display.to_string())
+
+        create_rule = input("\nWould you like to create a new firewall rule based on one of these flows? (yes/no): ").lower()
+        if create_rule == 'yes':
+            selected_flow = None
+            while True:
+                try:
+                    flow_choice = int(get_input("Enter the number of the flow to use for the rule", "1"))
+                    if 1 <= flow_choice <= len(top_flows):
+                        selected_flow = top_flows.iloc[flow_choice - 1]
+                        break
+                    else:
+                        print("Invalid number. Please choose a number from the list.", file=sys.stderr)
+                except ValueError:
+                    print("Invalid input. Please enter a number.", file=sys.stderr)
+
+            print("\n--- Create a New NSRPC Rule Command ---")
+            print("This feature generates a CLI command and appends it to a file.")
+
+            try:
+                # --- Get validation files ---
+                ref_dir = Path(config.get('Paths', 'reference_dir'))
+                obj_file_path = get_input("Enter path to the objects file for validation (optional)", _find_latest_ref_file(str(ref_dir), "objects"))
+                if_file_path = get_input("Enter path to the interfaces file for validation (optional)", _find_latest_ref_file(str(ref_dir), "interfaces"))
+
+                known_objects = _converter_parse_objects_file(Path(obj_file_path)) if obj_file_path else set()
+                known_interfaces = _converter_parse_interfaces_file(Path(if_file_path)) if if_file_path else set()
+
+                # --- Get rule details from user ---
+                rule_details = {
+                    "from_src": get_input("Enter the source object name", selected_flow['srcname']),
+                    "to_dest": get_input("Enter the destination object name", selected_flow['dstname']),
+                    "service": get_input("Enter the service/port name", selected_flow['dstportname']),
+                    "action": get_input("Enter the action (pass/block)", "pass"),
+                    "comment": get_input("Enter a comment for the rule (optional)", f"Rule for {selected_flow['srcname']} to {selected_flow['dstname']}")
+                }
+
+                # --- Validate dependencies ---
+                missing_deps = _converter_find_missing_dependencies(rule_details, known_objects, known_interfaces, set())
+                if missing_deps:
+                    print("\n[WARNING] Missing dependencies found:", file=sys.stderr)
+                    for dep_type, name in missing_deps:
+                        print(f"  - {dep_type}: {name}", file=sys.stderr)
+                    if get_input("Continue anyway? (yes/no)", "no").lower() != 'yes':
+                        print("Rule creation cancelled.")
+                        return
+
+                # --- Get generation options ---
+                slot = int(get_input("Enter the filter policy slot (index)", "9"))
+                position = int(get_input("Enter the position for the new rule", "1"))
+
+                # --- Build the command ---
+                cmd, err = _converter_build_filter_cmd(rule_details, "", slot, position)
+
+                if err:
+                    print(f"\n[ERROR] Could not generate command: {err}", file=sys.stderr)
+                    return
+
+                # --- Append command to file ---
+                default_cli_path = os.path.join(output_dir, 'generated_rules_from_logs.txt')
+                cli_file = get_input("Enter the path to your CLI output file", default_cli_path)
+
+                with open(cli_file, 'a', encoding='utf-8') as f:
+                    f.write(f"# Rule generated from log analysis on {datetime.datetime.now().isoformat(timespec='seconds')}\n")
+                    f.write(cmd + "\n\n")
+
+                print(f"\nSuccessfully appended NSRPC command to {cli_file}")
+                print(f"Generated command:\n{cmd}")
+
+            except Exception as e:
+                print(f"An error occurred while creating the rule: {e}", file=sys.stderr)
+
+def _analyzer_process_logs(input_path, output_csv_path, output_summary_path):
+    """
+    Processes firewall log files to deduplicate entries and generate summaries.
+    This is the full, correct implementation.
+    """
+    # Step 1: Load data
+    df = None
+    if os.path.isdir(input_path):
+        print(f"Input path is a directory: {input_path}")
+        input_files = [os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith('.csv')]
+        if not input_files:
+            print("Error: No CSV files found in the directory.", file=sys.stderr)
+            return None
+        df_list = []
+        for f in input_files:
+            try:
+                df_temp = pd.read_csv(f, on_bad_lines='skip', encoding_errors='ignore', low_memory=False)
+                df_list.append(df_temp)
+            except Exception as e:
+                print(f"Error reading {f}: {e}", file=sys.stderr)
+        if not df_list:
+            print("Error: No valid CSV files could be processed.", file=sys.stderr)
+            return None
+        df = pd.concat(df_list, ignore_index=True)
+    elif os.path.isfile(input_path):
+        print(f"Input path is a single file: {input_path}")
+        try:
+            df = pd.read_csv(input_path, on_bad_lines='skip', encoding_errors='ignore', low_memory=False)
+        except Exception as e:
+            print(f"Error reading {input_path}: {e}", file=sys.stderr)
+            return None
+    else:
+        print(f"Error: Input path {input_path} is not a valid file or directory.", file=sys.stderr)
+        return None
+
+    print(f"Successfully loaded {len(df)} total rows.")
+
+    # Step 2: Clean and convert columns
+    required_cols = ['srcname', 'dstname', 'dstportname', 'time', 'rcvd', 'sent']
+    for col in required_cols:
+        if col not in df.columns:
+            print(f"Error: Required column '{col}' not found in the input data.", file=sys.stderr)
+            return None
+
+    df['time'] = pd.to_datetime(df['time'], errors='coerce')
+    df['rcvd'] = pd.to_numeric(df['rcvd'], errors='coerce').fillna(0)
+    df['sent'] = pd.to_numeric(df['sent'], errors='coerce').fillna(0)
+    df.dropna(subset=['srcname', 'dstname', 'dstportname', 'time'], inplace=True)
+
+    # Step 3: Sort by time and aggregate
+    df.sort_values('time', ascending=True, inplace=True)
+    group_keys = ['srcname', 'dstname', 'dstportname']
+    agg_dict = {'time': ['min', 'max'], 'rcvd': 'sum', 'sent': 'sum'}
+    first_cols = {col: 'first' for col in df.columns if col not in group_keys and col not in agg_dict}
+    agg_dict.update(first_cols)
+    aggregated_df = df.groupby(group_keys).agg(agg_dict)
+
+    # Step 4: Clean up aggregated dataframe
+    aggregated_df.columns = ['_'.join(col).strip() for col in aggregated_df.columns.values]
+    aggregated_df.rename(columns={'time_min': 'min_time', 'time_max': 'max_time', 'rcvd_sum': 'total_rcvd', 'sent_sum': 'total_sent'}, inplace=True)
+    aggregated_df['count'] = df.groupby(group_keys).size().values
+
+    output_cols = group_keys + ['count', 'min_time', 'max_time', 'total_rcvd', 'total_sent']
+    other_cols = [col for col in aggregated_df.columns if col not in output_cols]
+    final_cols = output_cols + sorted(other_cols)
+    aggregated_df = aggregated_df.reset_index()[final_cols]
+
+    # Step 5: Write cleaned data to CSV
+    aggregated_df.to_csv(output_csv_path, index=False)
+    print(f"Cleaned data with {len(aggregated_df)} unique flows written to {output_csv_path}")
+
+    # Step 6: Generate and write summary report
+    total_processed = len(df)
+    unique_flows = len(aggregated_df)
+    aggregated_df['total_traffic'] = aggregated_df['total_rcvd'] + aggregated_df['total_sent']
+    top_10_by_count = aggregated_df.sort_values('count', ascending=False).head(10)
+    top_10_by_traffic = aggregated_df.sort_values('total_traffic', ascending=False).head(10)
+
+    with open(output_summary_path, 'w') as f:
+        f.write("Firewall Log Analysis Summary\n" + "="*30 + "\n")
+        f.write(f"Total rows processed: {total_processed}\n")
+        f.write(f"Total unique flows identified: {unique_flows}\n\n")
+        f.write("Top 10 Flows by Count:\n" + "-"*25 + "\n")
+        f.write(top_10_by_count[['srcname', 'dstname', 'dstportname', 'count']].to_string(index=False))
+        f.write("\n\n")
+        f.write("Top 10 Flows by Total Traffic (Received + Sent):\n" + "-"*50 + "\n")
+        f.write(top_10_by_traffic[['srcname', 'dstname', 'dstportname', 'total_traffic', 'total_rcvd', 'total_sent']].to_string(index=False))
+        f.write("\n")
+
+    print(f"Summary report written to {output_summary_path}")
+    return aggregated_df
+
+def _execute_command_interactive(channel, command):
+    """Executes a command in an interactive shell and returns the output."""
+    channel.send(command + '\n')
+    time.sleep(3)  # Wait for the command to execute
+    output = ""
+    while channel.recv_ready():
+        output += channel.recv(65535).decode('utf-8', errors='ignore')
+    # Clean up the output to remove the command echo and prompt
+    lines = output.splitlines()
+    return "\n".join(lines[1:-1]) if len(lines) > 2 else ""
+
+def _export_logic(host, user, password, output_dir):
+    """Connects to the firewall and exports configuration."""
+    client = None
+    try:
+        print(f"Connecting to {host} as {user}...")
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname=host, username=user, password=password, port=22, timeout=15)
+        print("SSH connection successful.")
+
+        # Use a timestamp for unique filenames
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+
+        def save_output(basename, content):
+            filename = f"export_{basename}_{timestamp}.txt"
+            filepath = os.path.join(output_dir, filename)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+            print(f"   -> Output saved to '{filepath}'")
+
+        print("\n--- Exporting 'CONFIG' data ---")
+        channel = client.invoke_shell()
+        time.sleep(1)
+        channel.recv(65535)  # Clear initial banner
+        channel.send('cli\n')
+        time.sleep(1)
+        channel.send(password + '\n')
+        time.sleep(2)
+        channel.recv(6553_Z) # Clear the response after entering password
+        print("Entered 'cli' mode.")
+
+        print("-> Exporting objects and interfaces...")
+        save_output("objects", _execute_command_interactive(channel, "CONFIG OBJECT LIST type=all usage=any"))
+        save_output("interfaces", _execute_command_interactive(channel, "CONFIG NETWORK INTERFACE SHOW"))
+
+        channel.close()
+        return True
+
+    except paramiko.AuthenticationException:
+        print("Authentication failed. Please check your username and password.", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"An error occurred: {e}", file=sys.stderr)
+        return False
+    finally:
+        if client:
+            client.close()
+            print("\nSSH connection closed.")
+
+def export_config(config):
+    """Orchestrates the firewall configuration export."""
+    host = get_input("Enter the firewall IP address", config.get('Exporter', 'firewall_ip', fallback=""))
+    user = get_input("Enter the firewall username", config.get('Exporter', 'firewall_user', fallback="admin"))
+
+    if not host or not user:
+        print("Error: Firewall IP and username are required.")
+        return
+
+    # Securely get password
+    password = config.get('Exporter', 'firewall_password', fallback="")
+    if not password:
+        password = getpass.getpass(f"Enter password for {user}@{host}: ")
+
+    # Get the output directory from config
+    output_dir = config.get('Paths', 'reference_dir')
+    os.makedirs(output_dir, exist_ok=True) # Ensure it exists
+    print(f"Files will be saved in: '{output_dir}'")
+
+    if _export_logic(host, user, password, output_dir):
+        print("\nExport completed successfully.")
+    else:
+        print("\nExport failed.")
+
 def convert_rules(config):
     """Orchestrates the CSV to NSRPC conversion process with a user-friendly interface."""
     print("\n--- Convert Rules from CSV to CLI ---")
@@ -655,10 +656,10 @@ def _find_missing_rules_logic(source_rules, final_rules):
     for rule in final_rules:
         # A unique ID is a tuple of the core components of a rule
         rule_id = (
-            _pick(rule, CSV_ALIASES.get('from_src', ['from_src'])),
-            _pick(rule, CSV_ALIASES.get('to_dest', ['to_dest'])),
-            _pick(rule, CSV_ALIASES.get('service', ['service'])),
-            _pick(rule, ['action']),
+            _converter_pick(rule, _CONVERTER_CSV_ALIASES.get('from_src', ['from_src'])),
+            _converter_pick(rule, _CONVERTER_CSV_ALIASES.get('to_dest', ['to_dest'])),
+            _converter_pick(rule, _CONVERTER_CSV_ALIASES.get('service', ['service'])),
+            _converter_pick(rule, ['action']),
         )
         final_rule_ids.add(rule_id)
 
@@ -666,10 +667,10 @@ def _find_missing_rules_logic(source_rules, final_rules):
     seen_source_ids = set()
     for rule in source_rules:
         rule_id = (
-            _pick(rule, CSV_ALIASES.get('from_src', ['from_src'])),
-            _pick(rule, CSV_ALIASES.get('to_dest', ['to_dest'])),
-            _pick(rule, CSV_ALIASES.get('service', ['service'])),
-            _pick(rule, ['action']),
+            _converter_pick(rule, _CONVERTER_CSV_ALIASES.get('from_src', ['from_src'])),
+            _converter_pick(rule, _CONVERTER_CSV_ALIASES.get('to_dest', ['to_dest'])),
+            _converter_pick(rule, _CONVERTER_CSV_ALIASES.get('service', ['service'])),
+            _converter_pick(rule, ['action']),
         )
         # Check if the rule is missing and we haven't already added it
         if rule_id not in final_rule_ids and rule_id not in seen_source_ids:
@@ -695,12 +696,12 @@ def compare_rules(config):
     source_rules, final_rules = [], []
     for path in source_paths:
         if os.path.exists(path):
-            source_rules.extend(_read_csv_rules(path))
+            source_rules.extend(_converter_read_csv(path))
         else:
             print(f"Warning: Source file not found: {path}")
 
     if os.path.exists(final_csv_path):
-        final_rules = _read_csv_rules(final_csv_path)
+        final_rules = _converter_read_csv(final_csv_path)
     else:
         print(f"Error: Final file not found: {final_csv_path}")
         return
@@ -715,6 +716,8 @@ def compare_rules(config):
 
     cli_commands = []
     for i, rule in enumerate(missing_rules, start=1):
+        # TODO: The _build_rule_cmd function is not defined and its signature is likely
+        # incompatible with the newer _converter_build_filter_cmd. This function needs refactoring.
         cmd, err = _build_rule_cmd(rule, i)
         if cmd:
             cli_commands.append(cmd)
@@ -737,17 +740,17 @@ def _find_and_report_duplicates_logic(rows: list):
 
     for row in rows:
         # Create a normalized signature for the rule
-        source = _pick(row, CSV_ALIASES.get("from_src", ["from_src"])) or "any"
-        destination = _pick(row, CSV_ALIASES.get("to_dest", ["to_dest"])) or "any"
-        service = _pick(row, CSV_ALIASES.get("service", ["service"])) or "any"
-        action = _pick(row, ['action']) or "pass" # Default to pass if action is missing
+        source = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("from_src", ["from_src"])) or "any"
+        destination = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("to_dest", ["to_dest"])) or "any"
+        service = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("service", ["service"])) or "any"
+        action = _converter_pick(row, ['action']) or "pass" # Default to pass if action is missing
 
         signature = (source, destination, service, action)
 
         # Store the occurrence details
         occurrence = {
             "file": row.get("source_file", "N/A"),
-            "name": _pick(row, ["rule name", "rulename", "comment"]) or "Unnamed Rule"
+            "name": _converter_pick(row, ["rule name", "rulename", "comment"]) or "Unnamed Rule"
         }
         seen_rules.setdefault(signature, []).append(occurrence)
 
@@ -780,7 +783,7 @@ def detect_duplicates(config):
     all_rows = []
     for path in paths:
         if os.path.exists(path):
-            rows = _read_csv_rules(path)
+            rows = _converter_read_csv(path)
             # Add source file information to each row for better reporting
             for row in rows:
                 row['source_file'] = os.path.basename(path)
