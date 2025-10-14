@@ -17,22 +17,58 @@ Before running the script, you need to install the required Python libraries.
     ```
 
 <details>
-<summary><b>(Optional) Offline Installation Instructions for Paramiko</b></summary>
+<summary><b>Offline Installation for Windows VM (No Internet Access)</b></summary>
 
-If you need to install the `paramiko` library on a machine without internet access, you can follow these steps:
+Here is a guide to download the required packages on a connected machine and then install them on an offline Windows VM running Python 3.9.13.
 
-1.  **On a machine with internet access**, download the library and its dependencies:
-    ```sh
-    # This will download the necessary wheel files into a 'wheelhouse' directory
-    python -m pip download --dest ./wheelhouse "paramiko"
-    ```
-2.  **Transfer the `wheelhouse` directory** to the offline machine.
-3.  **On the offline machine**, run the installation using the local files:
-    ```sh
-    # The --no-index flag prevents pip from trying to access the internet
-    # The --find-links flag tells pip where to find the packages
-    python -m pip install --no-index --find-links=./wheelhouse paramiko
-    ```
+### Context and Prerequisites
+- **Target System**: Windows 64-bit with Python 3.9.13.
+- **Python Command**: Use `py -m pip` on Windows to ensure you are using the correct Python interpreter.
+- **Compatibility Tags**: The wheel files must match the target system's compatibility tags: `cp39` (for the Python interpreter) and `win_amd64` (for the platform).
+- **Pandas Version**: Pandas 2.3+ requires Python 3.10 or newer. For Python 3.9, you must use the 2.2.x series.
+
+### Step A — Download Wheels on a Connected Machine
+These commands will download the binary wheels for Python 3.9 (64-bit) and their dependencies into a local directory named `.\wheels`.
+
+```powershell
+# Create a directory to store the wheels
+mkdir .\wheels
+
+# Download Pandas 2.2.x for Python 3.9, Windows 64-bit
+py -m pip download --only-binary=:all: --implementation cp --python-version 39 --abi cp39 --platform win_amd64 "pandas==2.2.*" -d .\wheels
+
+# Download Paramiko 3.x and its dependencies for Python 3.9, Windows 64-bit
+py -m pip download --only-binary=:all: --implementation cp --python-version 39 --abi cp39 --platform win_amd64 "paramiko==3.*" -d .\wheels
+```
+
+### Step B — Transfer Files to the VM
+Copy the entire `.\wheels` directory to the offline VM using a USB drive, shared network folder, or any other method. Do not rename the downloaded wheel files, as their names contain the compatibility tags that `pip` needs to recognize them.
+
+### Step C — Install Offline from Wheels
+On the VM, open a terminal, navigate into the `wheels` directory, and run the following commands to install the packages. The `--no-index` flag prevents `pip` from attempting to connect to the internet.
+
+```powershell
+cd .\wheels
+py -m pip install --no-index --find-links=. "pandas==2.2.*"
+py -m pip install --no-index --find-links=. "paramiko==3.*"
+```
+
+### Quick Verification
+You can verify that the packages were installed correctly by running:
+```powershell
+py -c "import pandas, paramiko; print(pandas.__version__, paramiko.__version__)"
+```
+
+### Included Dependencies
+- **Pandas**: Depends on `numpy` and `python-dateutil`.
+- **Paramiko**: Depends on `cryptography`, `bcrypt`, and `PyNaCl`.
+
+The `pip download` command automatically collects all of these required dependencies for the specified platform.
+
+### Troubleshooting
+- If you see a "No matching distribution found" error during the offline installation, it means that `pip` could not find a compatible wheel in the directory specified by `--find-links`. Ensure the wheel files for your platform (`cp39` and `win_amd64`) are present.
+- If you have multiple Python versions installed, always use `py -m pip` to ensure you are targeting the correct one.
+
 </details>
 
 ## 3. Configuration
