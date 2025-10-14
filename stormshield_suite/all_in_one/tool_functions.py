@@ -11,6 +11,7 @@ import csv
 from pathlib import Path
 from itertools import zip_longest
 import datetime
+from collections import Counter
 
 # A helper function to get user input with a default value from config
 def get_input(prompt, default=""):
@@ -761,115 +762,192 @@ def compare_rules(config):
         except Exception as e:
             print(f"Could not write summary file: {e}", file=sys.stderr)
 
-def _find_and_report_duplicates_logic(rows: list, output_dir: str):
-    """Analyzes rows, identifies duplicates, and generates deletion script and full report."""
+def _duplicator_normalize_field(value: str) -> str:
+    """
+    Normalizes a field that may contain multiple objects separated by commas or semicolons.
+    Sorts the objects to make the signature order-independent.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    components = [comp.strip() for comp in re.split(r'[,;]', value) if comp.strip()]
+    if len(components) > 1:
+        components.sort()
+        return ",".join(components)
+    return value.strip()
+
+def _duplicator_find_duplicates(rows: list, debug: bool = False) -> dict:
+    """Analyzes rows and returns a dictionary of found duplicates."""
+    if debug:
+        print("\n--- DEBUG: GENERATED SIGNATURES ---")
     seen_rules = {}
-
-    # Use a copy to avoid modifying the original list of dicts from other functions
-    all_rows = [row.copy() for row in rows]
-
-    for i, row in enumerate(all_rows):
-        row['original_index'] = i # Keep track of original position for reference
-        source = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("from_src", ["from_src"])) or "any"
-        destination = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("to_dest", ["to_dest"])) or "any"
-        service = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("service", ["service"])) or "any"
+    for row in rows:
+        if not _converter_pick(row, ["action", "from_src", "to_dest"]):
+            continue
+        source = _duplicator_normalize_field(_converter_pick(row, _CONVERTER_CSV_ALIASES.get("from_src", ["from_src"]))) or "any"
+        destination = _duplicator_normalize_field(_converter_pick(row, _CONVERTER_CSV_ALIASES.get("to_dest", ["to_dest"]))) or "any"
+        dest_port = _duplicator_normalize_field(_converter_pick(row, _CONVERTER_CSV_ALIASES.get("service", ["service"]))) or "any"
         protocol = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("proto", ["proto"])) or "any"
-        signature = (source, destination, service, protocol)
-        seen_rules.setdefault(signature, []).append(row)
+        action = _converter_pick(row, ["action"]) or "any"
+        signature = (source, destination, dest_port, protocol, action)
+        if debug:
+            line_num = row.get('original_line', 'N/A')
+            print(f"Ligne {line_num}: Signature = {signature}")
+        occurrence = {
+            "file": row.get("source_file", "N/A"),
+            "line": row.get("original_line", "N/A"),
+            "name": _converter_pick(row, ["rule_name"]) or "Sans nom",
+            "nat_line": row.get("nat_line")
+        }
+        seen_rules.setdefault(signature, []).append(occurrence)
+    return {sig: occs for sig, occs in seen_rules.items() if len(occs) > 1}
 
-    # --- Data collection ---
-    full_report_rows = []
-    deletion_commands = []
-
-    duplicates_map = {sig: occs for sig, occs in seen_rules.items() if len(occs) > 1}
-
-    print("\n--- Duplicate Rules Report ---")
-
-    # --- File Generation ---
-    delete_script_path = os.path.join(output_dir, "delete_duplicate_rules.txt")
-    full_report_path = os.path.join(output_dir, "duplicate_rules_full_report.csv")
-
-    if not duplicates_map:
-        print("No duplicate rules were found.")
-        with open(delete_script_path, 'w', encoding='utf-8') as f:
-            f.write("# No duplicate rules found to delete.\n")
-        with open(full_report_path, 'w', encoding='utf-8', newline='') as f:
-            f.write("No duplicate rules were found.\n")
-        print(f"Reports written to {output_dir}")
-        return
-
-    # Get the policy slot from the user once
-    slot_index = get_input("Enter the policy slot index to generate deletion commands for", "9")
-
-    for sig, occs in duplicates_map.items():
-        first_occurrence = occs[0]
-        duplicate_occs = occs[1:]
-
-        print(f"\n[DUPLICATE FOUND] - Signature: (Source: {sig[0]}, Destination: {sig[1]}, Service: {sig[2]}, Protocol: {sig[3]})")
-        print(f"  - Original found in: '{first_occurrence.get('source_file', 'N/A')}' (Rule: '{_converter_pick(first_occurrence, _CONVERTER_CSV_ALIASES.get('rule_name'))}')")
-
-        full_report_rows.extend(occs)
-
-        for dup_row in duplicate_occs:
-            print(f"  - Duplicate found in: '{dup_row.get('source_file', 'N/A')}' (Rule: '{_converter_pick(dup_row, _CONVERTER_CSV_ALIASES.get('rule_name'))}')")
-            rulename = _converter_pick(dup_row, _CONVERTER_CSV_ALIASES.get('rule_name'))
-            if rulename:
-                rule_type = "nat" if _converter_classify_row(dup_row) == "NAT" else "filter"
-                formatted_rulename = _converter_format_nsrpc_param(rulename)
-                command = f"CONFIG FILTER RULE REMOVE index={slot_index} type={rule_type} name={formatted_rulename}"
-                comment = (f"# Deletes duplicate of rule '{_converter_pick(first_occurrence, _CONVERTER_CSV_ALIASES.get('rule_name'))}' "
-                           f"from file '{first_occurrence.get('source_file', 'N/A')}'.")
-                deletion_commands.append(f"{comment}\n{command}")
+def _duplicator_format_as_markdown(duplicates: dict, report_type: str = 'rules') -> str:
+    """Formats a dictionary of duplicates into a multi-section Markdown report."""
+    if not duplicates:
+        return "No duplicates detected."
+    report_lines = []
+    is_nat_report = report_type == 'nat'
+    sorted_signatures = sorted(duplicates.keys(), key=lambda sig: (duplicates[sig][0]['file'], duplicates[sig][0]['line']))
+    for sig in sorted_signatures:
+        occs = duplicates[sig]
+        source, dest, port, proto, action = sig
+        header_title = f"### Duplicate - Signature: (Source: `{source}`, Destination: `{dest}`, Port: `{port}`, Protocol: `{proto}`, Action: `{action}`)"
+        report_lines.append(header_title)
+        report_lines.append("")
+        if is_nat_report:
+            table_header = "| File | Line (File) | Line (NAT) | Rule Name |"
+            table_separator = "|---|---|---|---|"
+        else:
+            table_header = "| File | Line | Rule Name |"
+            table_separator = "|---|---|---|"
+        report_lines.append(table_header)
+        report_lines.append(table_separator)
+        sort_key = 'nat_line' if is_nat_report else 'line'
+        sorted_occs = sorted(occs, key=lambda x: (x['file'], x.get(sort_key, 0)))
+        for occ in sorted_occs:
+            file = f"`{occ['file']}`"
+            line = f"`{occ['line']}`"
+            name = f"`{occ['name']}`"
+            if is_nat_report:
+                nat_line_val = f"`{occ.get('nat_line', 'N/A')}`"
+                report_lines.append(f"| {file} | {line} | {nat_line_val} | {name} |")
             else:
-                no_name_comment = (f"# WARNING: Cannot generate delete command for rule from file "
-                                   f"'{dup_row.get('source_file', 'N/A')}' (original index {dup_row['original_index']}) "
-                                   f"because it has no 'rulename'.")
-                deletion_commands.append(no_name_comment)
+                report_lines.append(f"| {file} | {line} | {name} |")
+        if sig != sorted_signatures[-1]:
+            report_lines.append("\n---\n")
+    return "\n".join(report_lines)
 
-    # --- Write Deletion Script ---
-    with open(delete_script_path, 'w', encoding='utf-8') as f:
-        f.write(f"# Generated on {datetime.datetime.now().isoformat(timespec='seconds')}\n")
-        f.write(f"# This script contains commands to delete {len(deletion_commands)} duplicate rules.\n")
-        f.write("# The first-encountered instance of each rule is kept.\n\n")
-        f.write("\n\n".join(deletion_commands))
-    print(f"\nSuccessfully wrote {len(deletion_commands)} deletion commands to: {delete_script_path}")
-
-    # --- Write Full CSV Report ---
-    try:
-        duplicate_df = pd.DataFrame(full_report_rows)
-        if 'original_index' in duplicate_df.columns:
-            duplicate_df.drop(columns=['original_index'], inplace=True)
-
-        duplicate_df.to_csv(full_report_path, index=False, sep=';', encoding='utf-8-sig')
-        print(f"Successfully wrote a full report of {len(duplicate_df)} rules involved in duplicates to: {full_report_path}")
-    except Exception as e:
-        print(f"Could not write full duplicate report: {e}", file=sys.stderr)
+def _duplicator_generate_delete_script(duplicates: dict, report_type: str, index: int, is_global: bool) -> list:
+    """Generates a list of Stormshield CLI commands to delete duplicate rules."""
+    commands = []
+    rule_type = 'nat' if report_type == 'nat' else 'filter'
+    global_param = " global=1" if is_global else ""
+    sorted_signatures = sorted(duplicates.keys(), key=lambda sig: (duplicates[sig][0]['file'], duplicates[sig][0]['line']))
+    for sig in sorted_signatures:
+        occs = duplicates[sig]
+        sort_key = 'nat_line' if report_type == 'nat' else 'line'
+        sorted_occs = sorted(occs, key=lambda x: (x['file'], x.get(sort_key, 0)))
+        name_counts = Counter(occ['name'] for occ in sorted_occs)
+        for occ_to_delete in sorted_occs[1:]:
+            rule_name = occ_to_delete.get('name')
+            command = None
+            if report_type == 'nat':
+                if rule_name and rule_name != "Sans nom":
+                    command = f'CONFIG FILTER RULE REMOVE index={index} type={rule_type} name="{rule_name}"{global_param}'
+            else:
+                use_position = not rule_name or rule_name == "Sans nom" or name_counts[rule_name] > 1
+                if use_position:
+                    position = occ_to_delete.get('line')
+                    command = f'CONFIG FILTER RULE REMOVE index={index} type={rule_type} position={position}{global_param}'
+                else:
+                    command = f'CONFIG FILTER RULE REMOVE index={index} type={rule_type} name="{rule_name}"{global_param}'
+            if command:
+                commands.append(command)
+    return commands
 
 def detect_duplicates(config):
     """Orchestrates the duplicate rule detection process."""
-    print("This tool analyzes one or more CSV files to find duplicate rules based on Source, Destination, Service, and Action.")
-
-    # Get user input for CSV files
-    csv_path_str = get_input("Enter the path(s) to your CSV file(s) (comma-separated)", config.get('Paths', 'rules_csv_path', fallback=""))
-    paths = [p.strip() for p in csv_path_str.split(',') if p.strip()]
-    if not paths:
-        print("Error: No CSV files provided.")
+    print("This tool analyzes CSV files to find duplicate filter and NAT rules.")
+    csv_paths_str = get_input("Enter path(s) to your input CSV file(s) (comma-separated)", config.get('Paths', 'rules_csv_path', fallback=""))
+    if not csv_paths_str:
+        print("Error: No input CSV files provided.")
         return
+    csv_paths = [Path(p.strip()) for p in csv_paths_str.split(',') if p.strip()]
+
+    # Get user options
+    slot_index = int(get_input("Enter the policy slot number for the deletion script", "9"))
+    is_global = get_input("Use global context for deletion (global=1)? (yes/no)", "no").lower() == 'yes'
+    debug_mode = get_input("Enable debug mode to show generated signatures? (yes/no)", "no").lower() == 'yes'
 
     all_rows = []
-    for path_str in paths:
-        path = Path(path_str)
-        if path.exists():
-            rows = _converter_read_csv(path)
-            for row in rows:
-                row['source_file'] = path.name
-            all_rows.extend(rows)
-        else:
-            print(f"Warning: File not found and will be skipped: {path}")
+    for file_path in csv_paths:
+        if not file_path.exists():
+            print(f"ERROR: File not found: '{file_path}'")
+            continue
+        print(f"Reading file: {file_path}")
+        rows = _converter_read_csv(file_path)
+        for row in rows:
+            row['source_file'] = file_path.name
+        all_rows.extend(rows)
 
     if not all_rows:
-        print("Could not load any rules to analyze.")
+        print("No data to analyze.")
         return
 
-    output_dir = config.get('Paths', 'output_dir')
-    _find_and_report_duplicates_logic(all_rows, output_dir)
+    # Separate rows into filter rules and NAT rules
+    rules_rows = [row for row in all_rows if "local_filter_slot" in row.get("#type_slot", "")]
+    nat_rows = [row for row in all_rows if "local_nat_slot" in row.get("#type_slot", "")]
+
+    # Process filter rules
+    print("\nAnalyzing filter rule duplicates...")
+    rule_duplicates = _duplicator_find_duplicates(rules_rows, debug=debug_mode)
+    rule_report = _duplicator_format_as_markdown(rule_duplicates, report_type='rules')
+
+    output_dir = Path(config.get('Paths', 'output_dir'))
+    output_dir.mkdir(exist_ok=True)
+
+    rule_report_path = output_dir / "duplicate_rules_report.md"
+    with open(rule_report_path, "w", encoding="utf-8") as f:
+        f.write(rule_report)
+    print(f"Filter rules report written to {rule_report_path} ({len(rule_duplicates)} duplicates found).")
+
+    # Process NAT rules
+    nat_rows.sort(key=lambda r: r.get('original_line', 0))
+    for i, row in enumerate(nat_rows):
+        row['nat_line'] = i + 1
+
+    print("\nAnalyzing NAT rule duplicates...")
+    nat_duplicates = _duplicator_find_duplicates(nat_rows, debug=debug_mode)
+    nat_report = _duplicator_format_as_markdown(nat_duplicates, report_type='nat')
+    nat_report_path = output_dir / "duplicate_nat_report.md"
+    with open(nat_report_path, "w", encoding="utf-8") as f:
+        f.write(nat_report)
+    print(f"NAT rules report written to {nat_report_path} ({len(nat_duplicates)} duplicates found).")
+
+    # Generate deletion script
+    print("\nGenerating deletion script...")
+    delete_commands = []
+    rule_delete_commands = _duplicator_generate_delete_script(rule_duplicates, 'rules', slot_index, is_global)
+    if rule_delete_commands:
+        delete_commands.append("# Commands to delete duplicate filter rules")
+        delete_commands.extend(rule_delete_commands)
+
+    nat_delete_commands = _duplicator_generate_delete_script(nat_duplicates, 'nat', slot_index, is_global)
+    if nat_delete_commands:
+        if delete_commands:
+            delete_commands.append("")
+        delete_commands.append("# Commands to delete duplicate NAT rules")
+        delete_commands.extend(nat_delete_commands)
+
+    if delete_commands:
+        delete_commands.append("\n# Activate the new filter policy")
+        delete_commands.append("CONFIG FILTER ACTIVATE")
+        script_content = "\n".join(delete_commands)
+        delete_script_path = output_dir / "delete_duplicates_script.sh"
+        with open(delete_script_path, "w", encoding="utf-8") as f:
+            f.write(script_content)
+        print(f"Deletion script generated at {delete_script_path} ({len(rule_delete_commands)} filter commands, {len(nat_delete_commands)} NAT commands).")
+    else:
+        print("No deletion commands to generate.")
+
+    print("\nAnalysis complete.")
