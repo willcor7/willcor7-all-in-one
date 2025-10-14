@@ -43,7 +43,7 @@ _CONVERTER_CSV_ALIASES = {
     "service": ["service", "to_port", "dstport"], "from_src": ["from_src", "source"],
     "to_dest": ["to_dest", "destination"], "nat_from_target": ["nat_from_target", "natsrctarget"],
     "nat_to_target": ["nat_to_target", "natdsttarget"], "nat_to_port": ["nat_to_port", "natdstport"],
-    "log_level": ["log_level", "loglevel"],
+    "log_level": ["log_level", "loglevel"], "proto": ["proto", "ip_proto"],
 }
 VALID_FILTER_TOKENS = {
     "rulename", "comment", "state", "action", "inspection", "service", "loglevel",
@@ -773,8 +773,8 @@ def _find_and_report_duplicates_logic(rows: list, output_dir: str):
         source = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("from_src", ["from_src"])) or "any"
         destination = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("to_dest", ["to_dest"])) or "any"
         service = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("service", ["service"])) or "any"
-        action = _converter_pick(row, ['action']) or "pass"
-        signature = (source, destination, service, action)
+        protocol = _converter_pick(row, _CONVERTER_CSV_ALIASES.get("proto", ["proto"])) or "any"
+        signature = (source, destination, service, protocol)
         seen_rules.setdefault(signature, []).append(row)
 
     # --- Data collection ---
@@ -805,7 +805,7 @@ def _find_and_report_duplicates_logic(rows: list, output_dir: str):
         first_occurrence = occs[0]
         duplicate_occs = occs[1:]
 
-        print(f"\n[DUPLICATE FOUND] - Signature: (Source: {sig[0]}, Destination: {sig[1]}, Service: {sig[2]}, Action: {sig[3]})")
+        print(f"\n[DUPLICATE FOUND] - Signature: (Source: {sig[0]}, Destination: {sig[1]}, Service: {sig[2]}, Protocol: {sig[3]})")
         print(f"  - Original found in: '{first_occurrence.get('source_file', 'N/A')}' (Rule: '{_converter_pick(first_occurrence, _CONVERTER_CSV_ALIASES.get('rule_name'))}')")
 
         full_report_rows.extend(occs)
