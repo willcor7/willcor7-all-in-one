@@ -149,7 +149,7 @@ def _converter_format_nsrpc_param(value: str) -> str:
     if not clean_val: return '""'
     is_simple = re.match(r'^[a-zA-Z0-9_.-]+$', clean_val) is not None
     if clean_val.lower() == 'any' or _converter_is_valid_ip_or_network(clean_val) or is_simple: return clean_val
-    else: return f'"{clean_val.replace("\"", r"\"")}"'
+    else: return '"' + clean_val.replace('"', '\\"') + '"'
 
 def _converter_pick(row: dict, keys: list) -> str:
     for k in keys:
