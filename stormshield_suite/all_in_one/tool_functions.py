@@ -895,8 +895,9 @@ def detect_duplicates(config):
         return
 
     # Separate rows into filter rules and NAT rules
-    rules_rows = [row for row in all_rows if "local_filter_slot" in row.get("#type_slot", "")]
-    nat_rows = [row for row in all_rows if "local_nat_slot" in row.get("#type_slot", "")]
+    # The header "#type_slot" is cleaned to "type_slot" by the _converter_read_csv function.
+    rules_rows = [row for row in all_rows if "local_filter_slot" in row.get("type_slot", "")]
+    nat_rows = [row for row in all_rows if "local_nat_slot" in row.get("type_slot", "")]
 
     # Process filter rules
     print("\nAnalyzing filter rule duplicates...")
