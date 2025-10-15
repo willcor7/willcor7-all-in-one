@@ -1,0 +1,11 @@
+# Rule from row 2 is PENDING. Reason: OBJECT:workstation1, OBJECT:https, OBJECT:server1
+# Data: {'source': 'workstation1', 'destination': 'server1', 'service': 'https', 'action': 'pass', 'comment': 'Allow web access'}
+
+# Rule from row 3 is PENDING. Reason: OBJECT:web-server, OBJECT:http, OBJECT:workstation2
+# Data: {'source': 'workstation2', 'destination': 'web-server', 'service': 'http', 'action': 'block', 'comment': 'Block web access'}
+
+# Rule from row 4 is PENDING. Reason: OBJECT:workstation1, OBJECT:ssh-server, OBJECT:ssh
+# Data: {'source': 'workstation1', 'destination': 'ssh-server', 'service': 'ssh', 'action': 'pass', 'comment': 'Allow SSH access'}
+
+# Rule from row 5 is PENDING. Reason: OBJECT:workstation1, OBJECT:https, OBJECT:server1
+# Data: {'source': 'workstation1', 'destination': 'server1', 'service': 'https', 'action': 'pass', 'comment': 'Duplicate Rule for testing'}

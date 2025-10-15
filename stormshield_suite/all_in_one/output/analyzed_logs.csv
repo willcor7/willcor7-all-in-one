@@ -1,0 +1,4 @@
+srcname,dstname,dstportname,count,min_time,max_time,total_rcvd,total_sent,action_first,arg_first,clientappid_first,dstcountry_first,dstip_first,dstport_first,msg_first,proto_first,ruleid_first,serverappid_first,srccountry_first,srcip_first,srcport_first,user_first
+workstation1,server1,https,2,2023-10-27 10:00:00,2023-10-27 10:01:00,4500,2500,pass,some_arg,1,FR,10.0.0.5,443,some_msg,6,10,2,US,192.168.1.10,12345,jdoe
+workstation1,ssh-server,ssh,1,2023-10-27 10:03:00,2023-10-27 10:03:00,3000,2000,pass,some_arg,5,GB,10.0.0.7,22,some_msg,6,11,6,US,192.168.1.10,12347,jdoe
+workstation2,web-server,http,1,2023-10-27 10:02:00,2023-10-27 10:02:00,100,500,block,some_arg,3,DE,10.0.0.6,80,some_msg,6,12,4,CA,192.168.1.20,54321,psmith
